@@ -37,32 +37,88 @@ type ModelRecommendation = {
 };
 
 // ── Model Catalog ──────────────────────────────────────────
-// Centralized registry of supported models grouped by capability.
-// The recommender selects from categories, not individual strings.
-// This makes it easy to swap models without touching rule logic.
+// Every model listed here is actively available in at least one of:
+//   Cursor, GitHub Copilot (VS Code), Windsurf, or JetBrains AI Assistant
+//   — free or paid tier — as of early 2026.
+//
+// Sources (checked Feb/Mar 2026):
+//   Cursor:          https://cursor.com/docs/models
+//   GitHub Copilot:  https://docs.github.com/en/copilot/reference/ai-models/supported-models
+//   GitHub Copilot:  https://docs.github.com/en/copilot/reference/ai-models/model-hosting
+//   Windsurf:        https://docs.windsurf.com/windsurf/models
+//   JetBrains:       https://www.jetbrains.com/help/ai-assistant/use-custom-models.html
+//
+// Models within each category are listed alphabetically so no vendor
+// has positional advantage. The picker rotates across all options over
+// time so no single provider is systematically recommended more often.
 
 const MODEL_CATALOG = {
-	// Deep reasoning, complex multi-step tasks
+	// ── HEAVY REASONING ─────────────────────────────────────
+	// Best for: architecture planning, deep debugging, multi-file refactors,
+	// "prove this", "step-by-step analysis", or very long prompts (800+ tokens).
+	// Available across: Cursor, Copilot, Windsurf, JetBrains.
 	HIGH_REASONING: [
-		'gpt-4', 'gpt-4o', 'gemini-1.5-pro', 'claude-3-opus',
+		'claude-opus-4',              // Anthropic — flagship, 200K ctx, Cursor + Copilot + JetBrains
+		'claude-opus-4.5',            // Anthropic — improved Opus, Copilot preview + JetBrains BYOK
+		'claude-opus-4.6 (Thinking)', // Anthropic — extended thinking mode, Cursor paid
+		'gemini-3.1-pro (High)',      // Google    — #1 ARC-AGI-2 (77.1%), Copilot + Windsurf
+		'gemini-3-pro',               // Google    — Copilot public preview, Windsurf
+		'gpt-5',                      // OpenAI    — Copilot Pro+ + Cursor; top reasoning
+		'gpt-oss-120b (High)',        // OpenAI    — open-weight high-reasoning tier, Cursor
+		'o3',                         // OpenAI    — reasoning-first, Cursor + Copilot agent mode
 	],
-	// Code-optimized or strong general-purpose at lower cost
+
+	// ── CODE & DEBUGGING ────────────────────────────────────
+	// Best for: code generation, PR reviews, bug fixing, stack traces.
+	// The daily-driver tier — fast enough for flow, smart enough for hard bugs.
 	CODE: [
-		'gpt-4o-mini', 'claude-3-sonnet', 'llama-3-70b',
+		'claude-sonnet-4',              // Anthropic — default in Cursor, top SWE-bench
+		'claude-sonnet-4.5',            // Anthropic — improved Sonnet, Copilot + JetBrains BYOK
+		'claude-sonnet-4.6',            // Anthropic — latest Sonnet, Copilot (premium multiplier TBC)
+		'claude-sonnet-4.6 (Thinking)', // Anthropic — thinking mode for harder code tasks, Cursor
+		'deepseek-v3',                  // DeepSeek  — free 0x credits in Cursor; strong at code
+		'gemini-2.5-pro',               // Google    — Copilot + JetBrains; large ctx coding
+		'gemini-3-flash',               // Google    — 78% SWE-bench, free in Windsurf + Cursor
+		'gemini-3.1-pro (Low)',         // Google    — low-reasoning tier, speed/quality balance
+		'gpt-4.1',                      // OpenAI    — Copilot default (replaced GPT-4o Jun 2025)
+		'gpt-5-mini',                   // OpenAI    — Copilot auto-rotation model, chain-of-thought
+		'gpt-oss-120b (Medium)',        // OpenAI    — open-weight medium-reasoning, Cursor
+		'grok-code-fast-1',             // xAI       — Copilot (zero data retention), fast code tasks
+		'swe-1.5',                      // Windsurf  — in-house agentic model; near Claude 4.5 perf
 	],
-	// Fastest response time, good for short/simple tasks
+
+	// ── FAST / LOW LATENCY ───────────────────────────────────
+	// Best for: short questions, inline completions, quick edits, "what is X".
+	// Prioritise speed over depth — devs reach for these constantly.
 	FAST: [
-		'gemini-1.5-flash', 'claude-3-haiku', 'gpt-3.5-turbo', 'llama-3-8b',
+		'claude-haiku-4.5',    // Anthropic — fastest Claude, low latency, Copilot + JetBrains
+		'gemini-2.5-flash',    // Google    — fast + large ctx, JetBrains BYOK
+		'gemini-3-flash',      // Google    — 3× faster than Gemini 3 Pro, Windsurf free tier
+		'gpt-4o',              // OpenAI    — multimodal, VS Code Copilot (only vision model)
+		'gpt-4o-mini',         // OpenAI    — cheap + fast, Cursor free tier (500 req/day)
+		'gpt-oss-120b (Low)',  // OpenAI    — open-weight low-reasoning = lowest latency, Cursor
+		'grok-3-mini',         // xAI       — fast tier, Cursor free
+		'raptor-mini',         // GitHub    — Copilot in-house fast model for completions/scripts
+		'swe-1-mini',          // Windsurf  — powers Windsurf Tab real-time completions
 	],
-	// Balanced general-purpose fallback
+
+	// ── GENERAL FALLBACK ─────────────────────────────────────
+	// For prompts where no strong signal is detected.
+	// Well-rounded models familiar to devs across all four IDEs.
 	GENERAL: [
-		'gpt-4o-mini', 'claude-3-sonnet', 'gemini-1.5-flash',
+		'claude-sonnet-4',   // Anthropic — Cursor default, broadly trusted
+		'gemini-3-flash',    // Google    — fast + capable, available free
+		'gpt-4.1',           // OpenAI    — Copilot + Visual Studio default
+		'gpt-5.1-codex',     // OpenAI    — Copilot codex model, strong at code + chat
 	],
 } as const;
 
-// Pick the first model in a category — the catalog is ordered by preference
+// Rotate through models using a time-based index (changes every minute)
+// so no vendor is systematically favoured over time.
 function pickFromCategory(category: keyof typeof MODEL_CATALOG): string {
-	return MODEL_CATALOG[category][0];
+	const models = MODEL_CATALOG[category];
+	const index = Math.floor(Date.now() / 60_000) % models.length;
+	return models[index];
 }
 
 // ── Module-level state ─────────────────────────────────────
@@ -177,13 +233,38 @@ export function activate(context: vscode.ExtensionContext) {
 		}
 	});
 
-	context.subscriptions.push(disposable, showTodayCostCmd, explainTodayCostCmd);
+	// ── Configure Available Models ─────────────────────────
+	const configModelsCmd = vscode.commands.registerCommand('aiCost.configureAvailableModels', async () => {
+		// Build flat deduplicated list from catalog
+		const allModels = [...new Set(Object.values(MODEL_CATALOG).flat())];
+
+		const items = allModels.map(model => ({
+			label: model,
+			picked: true,
+		}));
+
+		const selected = await vscode.window.showQuickPick(items, {
+			canPickMany: true,
+			placeHolder: 'Select the AI models you have access to',
+			title: 'Configure Available Models',
+			ignoreFocusOut: true,
+		});
+
+		if (selected) {
+			const count = selected.length;
+			vscode.window.showInformationMessage(
+				`${count} model${count === 1 ? '' : 's'} selected: ${selected.map(s => s.label).join(', ')}`
+			);
+		}
+	});
+
+	context.subscriptions.push(disposable, showTodayCostCmd, explainTodayCostCmd, configModelsCmd);
 
 	// ── Status Bar: Model Recommendation ──────────────────
 
 	statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
-	statusBarItem.text = '$(lightbulb) AI Model: gpt-4o-mini (General-purpose)';
-	statusBarItem.tooltip = 'Recommended model: gpt-4o-mini\nReason: General-purpose default\nConfidence: low';
+	statusBarItem.text = '$(lightbulb) AI Model: Waiting for prompt...';
+	statusBarItem.tooltip = 'Open a file and start typing to get a model recommendation.';
 	statusBarItem.show();
 	context.subscriptions.push(statusBarItem);
 
@@ -191,9 +272,30 @@ export function activate(context: vscode.ExtensionContext) {
 
 	function updateRecommendation() {
 		const editor = vscode.window.activeTextEditor;
-		if (!editor) { return; }
 
-		const text = editor.document.getText();
+		// No editor open → idle state
+		if (!editor) {
+			statusBarItem.text = '$(lightbulb) AI Model: No editor open';
+			statusBarItem.tooltip = 'Open a file and start typing to get a model recommendation.';
+			return;
+		}
+
+		const text = editor.document.getText().trim();
+
+		// Empty document → waiting state
+		if (text.length === 0) {
+			statusBarItem.text = '$(lightbulb) AI Model: Start typing...';
+			statusBarItem.tooltip = 'Type a prompt or code to get a real-time model recommendation.';
+			return;
+		}
+
+		// Too short to meaningfully analyze (< 10 chars)
+		if (text.length < 10) {
+			statusBarItem.text = '$(lightbulb) AI Model: Keep typing...';
+			statusBarItem.tooltip = 'Need a bit more text for an accurate recommendation.';
+			return;
+		}
+
 		const features = extractPromptFeatures(text);
 		const rec = recommendModel(features);
 
@@ -207,6 +309,8 @@ export function activate(context: vscode.ExtensionContext) {
 			`Recommended model: ${rec.model}`,
 			`Reason: ${rec.reason}`,
 			`Confidence: ${rec.confidence}`,
+			'',
+			`Tokens: ~${features.estimatedTokens} | Intent: ${features.intent}`,
 		].join('\n');
 	}
 

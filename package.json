@@ -26,6 +26,10 @@
       {
         "command": "aiCost.explainTodayCost",
         "title": "AI Cost: Explain Today's Cost"
+      },
+      {
+        "command": "aiCost.configureAvailableModels",
+        "title": "AI Cost: Configure Available Models"
       }
     ]
   },
