@@ -6,9 +6,23 @@ type DailyCost = {
 	date: string;
 	environment: string;
 	total_cost_usd: string;
+	total_tokens: number;
+	request_count: number;
+};
+
+type CostExplanation = {
+	date: string;
+	environment: string;
+	summary: string;
+	key_drivers: string[];
+	recommendations: string[];
 };
 
 let outputChannel: vscode.OutputChannel;
+
+function getTodayDate(): string {
+	return new Date().toISOString().split('T')[0];
+}
 
 // This method is called when your extension is activated
 // Your extension is activated the very first time the command is executed
@@ -42,18 +56,33 @@ export function activate(context: vscode.ExtensionContext) {
 
 	const showTodayCostCmd = vscode.commands.registerCommand('aiCost.showTodayCost', async () => {
 		if (!outputChannel) {
-			outputChannel = vscode.window.createOutputChannel('AI Cost Optimizer');
+			outputChannel = vscode.window.createOutputChannel('Slop Cost');
 		}
 
 		try {
-			const data = await callApi<DailyCost>(context, '/analytics/daily-cost');
+			const rows = await callApi<DailyCost[]>(context, '/analytics/daily-cost');
+			const today = getTodayDate();
+			const todayRow = rows.find(r => r.date === today);
 
 			outputChannel.clear();
 			outputChannel.appendLine('=== AI Cost: Today\'s Summary ===');
 			outputChannel.appendLine('');
-			outputChannel.appendLine(`Date:        ${data.date}`);
-			outputChannel.appendLine(`Environment: ${data.environment}`);
-			outputChannel.appendLine(`Total Cost:  $${data.total_cost_usd}`);
+
+			if (todayRow) {
+				outputChannel.appendLine(`Date:        ${todayRow.date}`);
+				outputChannel.appendLine(`Environment: ${todayRow.environment}`);
+				outputChannel.appendLine(`Total Cost:  $${todayRow.total_cost_usd}`);
+				outputChannel.appendLine(`Tokens Used: ${todayRow.total_tokens.toLocaleString()}`);
+				outputChannel.appendLine(`Requests:    ${todayRow.request_count.toLocaleString()}`);
+			} else {
+				outputChannel.appendLine(`No cost data recorded for ${today} yet.`);
+				if (rows.length > 0) {
+					const latest = rows[rows.length - 1];
+					outputChannel.appendLine('');
+					outputChannel.appendLine(`Latest available: ${latest.date}  —  $${latest.total_cost_usd}`);
+				}
+			}
+
 			outputChannel.appendLine('');
 			outputChannel.appendLine('================================');
 			outputChannel.show(true);
@@ -62,7 +91,42 @@ export function activate(context: vscode.ExtensionContext) {
 		}
 	});
 
-	context.subscriptions.push(disposable, showTodayCostCmd);
+	const explainTodayCostCmd = vscode.commands.registerCommand('aiCost.explainTodayCost', async () => {
+		if (!outputChannel) {
+			outputChannel = vscode.window.createOutputChannel('Slop Cost');
+		}
+
+		try {
+			const date = getTodayDate();
+			const data = await callApi<CostExplanation>(context, `/ai/explain/daily-cost?date=${date}&environment=dev`);
+
+			outputChannel.clear();
+			outputChannel.appendLine('=== AI Cost: Explanation ===');
+			outputChannel.appendLine('');
+			outputChannel.appendLine(`Date:        ${data.date}`);
+			outputChannel.appendLine(`Environment: ${data.environment}`);
+			outputChannel.appendLine('');
+			outputChannel.appendLine('Summary:');
+			outputChannel.appendLine(`  ${data.summary}`);
+			outputChannel.appendLine('');
+			outputChannel.appendLine('Key Drivers:');
+			data.key_drivers.forEach((driver, i) => {
+				outputChannel.appendLine(`  ${i + 1}. ${driver}`);
+			});
+			outputChannel.appendLine('');
+			outputChannel.appendLine('Recommendations:');
+			data.recommendations.forEach((rec, i) => {
+				outputChannel.appendLine(`  ${i + 1}. ${rec}`);
+			});
+			outputChannel.appendLine('');
+			outputChannel.appendLine('============================');
+			outputChannel.show(true);
+		} catch {
+			// callApi already shows user-facing errors
+		}
+	});
+
+	context.subscriptions.push(disposable, showTodayCostCmd, explainTodayCostCmd);
 }
 
 // This method is called when your extension is deactivated
