@@ -36,6 +36,35 @@ type ModelRecommendation = {
 	confidence: 'low' | 'medium' | 'high';
 };
 
+// ── Model Catalog ──────────────────────────────────────────
+// Centralized registry of supported models grouped by capability.
+// The recommender selects from categories, not individual strings.
+// This makes it easy to swap models without touching rule logic.
+
+const MODEL_CATALOG = {
+	// Deep reasoning, complex multi-step tasks
+	HIGH_REASONING: [
+		'gpt-4', 'gpt-4o', 'gemini-1.5-pro', 'claude-3-opus',
+	],
+	// Code-optimized or strong general-purpose at lower cost
+	CODE: [
+		'gpt-4o-mini', 'claude-3-sonnet', 'llama-3-70b',
+	],
+	// Fastest response time, good for short/simple tasks
+	FAST: [
+		'gemini-1.5-flash', 'claude-3-haiku', 'gpt-3.5-turbo', 'llama-3-8b',
+	],
+	// Balanced general-purpose fallback
+	GENERAL: [
+		'gpt-4o-mini', 'claude-3-sonnet', 'gemini-1.5-flash',
+	],
+} as const;
+
+// Pick the first model in a category — the catalog is ordered by preference
+function pickFromCategory(category: keyof typeof MODEL_CATALOG): string {
+	return MODEL_CATALOG[category][0];
+}
+
 // ── Module-level state ─────────────────────────────────────
 
 let outputChannel: vscode.OutputChannel;
@@ -187,9 +216,18 @@ export function activate(context: vscode.ExtensionContext) {
 		debounceTimer = setTimeout(updateRecommendation, 400);
 	}
 
-	// Fire on keystroke (selection changes on every edit)
+	// Fix 2: Use onDidChangeTextDocument instead of onDidChangeTextEditorSelection.
+	// onDidChangeTextEditorSelection fires on every cursor move (arrow keys, clicks),
+	// which causes noisy, unintuitive updates. onDidChangeTextDocument only fires
+	// when actual text edits occur — the correct signal for re-analysis.
 	context.subscriptions.push(
-		vscode.window.onDidChangeTextEditorSelection(scheduleUpdate),
+		vscode.workspace.onDidChangeTextDocument((e) => {
+			// Only react to edits in the active editor's document
+			const activeDoc = vscode.window.activeTextEditor?.document;
+			if (activeDoc && e.document === activeDoc) {
+				scheduleUpdate();
+			}
+		}),
 		vscode.window.onDidChangeActiveTextEditor(scheduleUpdate)
 	);
 
@@ -312,7 +350,7 @@ function recommendModel(features: PromptFeatures): ModelRecommendation {
 	// Rule 1: Complex reasoning demands the most capable model
 	if (features.reasoningLevel === 'high') {
 		return {
-			model: 'gpt-4',
+			model: pickFromCategory('HIGH_REASONING'),
 			reason: 'High reasoning depth detected',
 			confidence: 'high',
 		};
@@ -321,7 +359,7 @@ function recommendModel(features: PromptFeatures): ModelRecommendation {
 	// Rule 2: Code-related tasks benefit from code-optimized models
 	if (features.hasCode || features.intent === 'debug') {
 		return {
-			model: 'gpt-4o-mini',
+			model: pickFromCategory('CODE'),
 			reason: 'Code-related or debugging task',
 			confidence: 'medium',
 		};
@@ -330,7 +368,7 @@ function recommendModel(features: PromptFeatures): ModelRecommendation {
 	// Rule 3: Short, latency-sensitive prompts → fastest model
 	if (features.latencySensitive && features.estimatedTokens < 300) {
 		return {
-			model: 'gemini-1.5-flash',
+			model: pickFromCategory('FAST'),
 			reason: 'Short prompt with low latency requirement',
 			confidence: 'high',
 		};
@@ -339,7 +377,7 @@ function recommendModel(features: PromptFeatures): ModelRecommendation {
 	// Rule 4: Summarization is well-suited for fast models
 	if (features.intent === 'summarize') {
 		return {
-			model: 'gemini-1.5-flash',
+			model: pickFromCategory('FAST'),
 			reason: 'Summarization task',
 			confidence: 'medium',
 		};
@@ -347,7 +385,7 @@ function recommendModel(features: PromptFeatures): ModelRecommendation {
 
 	// Fallback: general-purpose default
 	return {
-		model: 'gpt-4o-mini',
+		model: pickFromCategory('GENERAL'),
 		reason: 'General-purpose default',
 		confidence: 'low',
 	};
