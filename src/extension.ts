@@ -280,9 +280,18 @@ export function activate(context: vscode.ExtensionContext) {
 			return;
 		}
 
-		const text = editor.document.getText().trim();
+		// Selection-first: user selection is a strong intent signal.
+		// If the user explicitly highlights text, they want a recommendation
+		// for THAT text, not the entire file (which may be thousands of lines
+		// of irrelevant code). Primary selection only for v0.1.
+		const selection = editor.selection;
+		const hasSelection = !selection.isEmpty;
+		const text = hasSelection
+			? editor.document.getText(selection).trim()
+			: editor.document.getText().trim();
+		const source = hasSelection ? 'selected text' : 'full document';
 
-		// Empty document → waiting state
+		// Empty → waiting state
 		if (text.length === 0) {
 			statusBarItem.text = '$(lightbulb) AI Model: Start typing...';
 			statusBarItem.tooltip = 'Type a prompt or code to get a real-time model recommendation.';
@@ -309,6 +318,7 @@ export function activate(context: vscode.ExtensionContext) {
 			`Recommended model: ${rec.model}`,
 			`Reason: ${rec.reason}`,
 			`Confidence: ${rec.confidence}`,
+			`Based on: ${source}`,
 			'',
 			`Tokens: ~${features.estimatedTokens} | Intent: ${features.intent}`,
 		].join('\n');
@@ -316,22 +326,22 @@ export function activate(context: vscode.ExtensionContext) {
 
 	function scheduleUpdate() {
 		if (debounceTimer) { clearTimeout(debounceTimer); }
-		// 400ms debounce prevents excessive computation while typing
+		// 400ms debounce prevents excessive computation while typing/selecting
 		debounceTimer = setTimeout(updateRecommendation, 400);
 	}
 
-	// Fix 2: Use onDidChangeTextDocument instead of onDidChangeTextEditorSelection.
-	// onDidChangeTextEditorSelection fires on every cursor move (arrow keys, clicks),
-	// which causes noisy, unintuitive updates. onDidChangeTextDocument only fires
-	// when actual text edits occur — the correct signal for re-analysis.
+	// Three listeners cover all relevant state changes:
+	//   1. Text edits          → re-analyze content
+	//   2. Selection changes   → switch between selection and full-doc analysis
+	//   3. Editor switches     → new document context
 	context.subscriptions.push(
 		vscode.workspace.onDidChangeTextDocument((e) => {
-			// Only react to edits in the active editor's document
 			const activeDoc = vscode.window.activeTextEditor?.document;
 			if (activeDoc && e.document === activeDoc) {
 				scheduleUpdate();
 			}
 		}),
+		vscode.window.onDidChangeTextEditorSelection(scheduleUpdate),
 		vscode.window.onDidChangeActiveTextEditor(scheduleUpdate)
 	);
 
