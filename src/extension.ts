@@ -18,6 +18,24 @@ type CostExplanation = {
 	recommendations: string[];
 };
 
+type CostByModel = {
+	date: string;
+	model_name: string;
+	environment: string;
+	total_cost_usd: string;
+	total_tokens: number;
+	request_count: number;
+};
+
+type CostByEndpoint = {
+	date: string;
+	endpoint: string;
+	environment: string;
+	total_cost_usd: string;
+	total_tokens: number;
+	request_count: number;
+};
+
 // ── Types: Local Model Recommender ─────────────────────────
 
 type PromptFeatures = {
@@ -36,27 +54,8 @@ type ModelRecommendation = {
 	confidence: 'low' | 'medium' | 'high';
 };
 
-// ── Model Catalog ──────────────────────────────────────────
-// Every model listed here is actively available in at least one of:
-//   Cursor, GitHub Copilot (VS Code), Windsurf, or JetBrains AI Assistant
-//   — free or paid tier — as of early 2026.
-//
-// Sources (checked Feb/Mar 2026):
-//   Cursor:          https://cursor.com/docs/models
-//   GitHub Copilot:  https://docs.github.com/en/copilot/reference/ai-models/supported-models
-//   GitHub Copilot:  https://docs.github.com/en/copilot/reference/ai-models/model-hosting
-//   Windsurf:        https://docs.windsurf.com/windsurf/models
-//   JetBrains:       https://www.jetbrains.com/help/ai-assistant/use-custom-models.html
-//
-// Models within each category are listed alphabetically so no vendor
-// has positional advantage. The picker rotates across all options over
-// time so no single provider is systematically recommended more often.
-
 const MODEL_CATALOG = {
-	// ── HEAVY REASONING ─────────────────────────────────────
-	// Best for: architecture planning, deep debugging, multi-file refactors,
-	// "prove this", "step-by-step analysis", or very long prompts (800+ tokens).
-	// Available across: Cursor, Copilot, Windsurf, JetBrains.
+
 	HIGH_REASONING: [
 		'claude-opus-4',              // Anthropic — flagship, 200K ctx, Cursor + Copilot + JetBrains
 		'claude-opus-4.5',            // Anthropic — improved Opus, Copilot preview + JetBrains BYOK
@@ -115,10 +114,30 @@ const MODEL_CATALOG = {
 
 // Rotate through models using a time-based index (changes every minute)
 // so no vendor is systematically favoured over time.
-function pickFromCategory(category: keyof typeof MODEL_CATALOG): string {
-	const models = MODEL_CATALOG[category];
-	const index = Math.floor(Date.now() / 60_000) % models.length;
-	return models[index];
+// Filters to only models the user has marked as enabled before rotating.
+function pickFromCategory(
+	category: keyof typeof MODEL_CATALOG,
+	enabledModels: string[]
+): string {
+	// Only consider models from this category that the user has enabled
+	const candidates = (MODEL_CATALOG[category] as readonly string[]).filter(
+		m => enabledModels.includes(m)
+	);
+	// Fallback: if none from this category are enabled, use any enabled model
+	const pool = candidates.length > 0 ? candidates : enabledModels;
+	if (pool.length === 0) { return DEFAULT_ENABLED_MODELS[0]; }
+	const index = Math.floor(Date.now() / 60_000) % pool.length;
+	return pool[index];
+}
+
+// ── Enabled Models (user-declared) ────────────────────────
+const ENABLED_MODELS_KEY = 'slopcost.enabledModels';
+// Safe defaults: cheap, fast, widely available on free tiers
+const DEFAULT_ENABLED_MODELS = ['gpt-4o-mini', 'gemini-3-flash', 'claude-haiku-4.5'];
+
+function getEnabledModels(context: vscode.ExtensionContext): string[] {
+	const stored = context.globalState.get<string[]>(ENABLED_MODELS_KEY);
+	return stored && stored.length > 0 ? stored : DEFAULT_ENABLED_MODELS;
 }
 
 // ── Module-level state ─────────────────────────────────────
@@ -130,6 +149,136 @@ let debounceTimer: ReturnType<typeof setTimeout> | undefined;
 function getTodayDate(): string {
 	return new Date().toISOString().split('T')[0];
 }
+
+function offsetDate(days: number): string {
+	const d = new Date();
+	d.setDate(d.getDate() + days);
+	return d.toISOString().split('T')[0];
+}
+
+type DateRange = { start: string; end: string; label: string };
+
+// Show a QuickPick to choose a date range.
+// Returns undefined if the user cancels at any point.
+async function pickDateRange(): Promise<DateRange | undefined> {
+	const today = getTodayDate();
+
+	const choice = await vscode.window.showQuickPick(
+		[
+			{ label: '$(calendar) Today', detail: today },
+			{ label: '$(history) Yesterday', detail: offsetDate(-1) },
+			{ label: '$(graph-line) Last 7 days', detail: `${offsetDate(-6)} → ${today}` },
+			{ label: '$(graph-line) Last 30 days', detail: `${offsetDate(-29)} → ${today}` },
+			{ label: '$(edit) Custom date…', detail: 'Enter a specific YYYY-MM-DD date' },
+		],
+		{ placeHolder: 'Select date range', title: 'SlopCost: Date Range', ignoreFocusOut: true }
+	);
+	if (!choice) { return undefined; }
+
+	const ISO_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+	if (choice.label.includes('Today')) {
+		return { start: today, end: today, label: `Today (${today})` };
+	}
+	if (choice.label.includes('Yesterday')) {
+		const d = offsetDate(-1);
+		return { start: d, end: d, label: `Yesterday (${d})` };
+	}
+	if (choice.label.includes('7 days')) {
+		return { start: offsetDate(-6), end: today, label: 'Last 7 days' };
+	}
+	if (choice.label.includes('30 days')) {
+		return { start: offsetDate(-29), end: today, label: 'Last 30 days' };
+	}
+
+	// Custom: ask for a specific date
+	const input = await vscode.window.showInputBox({
+		prompt: 'Enter date (YYYY-MM-DD)',
+		placeHolder: today,
+		value: today,
+		ignoreFocusOut: true,
+		validateInput: v =>
+			ISO_RE.test(v) && !isNaN(Date.parse(v))
+				? null
+				: 'Must be a valid date in YYYY-MM-DD format',
+	});
+	if (!input) { return undefined; }
+	return { start: input, end: input, label: `Custom (${input})` };
+}
+
+// Client-side date filter — belt-and-suspenders in case
+// the backend does not support start_date/end_date params.
+function inRange(date: string, start: string, end: string): boolean {
+	return date >= start && date <= end;
+}
+
+
+// ── Output Channel Formatter ──────────────────────────────
+// Brand mark: [>$] — the terminal icon from slopcost-icon.svg in ASCII.
+// Plain unicode only — no ANSI, renders correctly in VS Code Output Channel.
+const HR = `  ${'─'.repeat(41)}`;
+const fmt = {
+
+	// Three-line brand header
+	//   ┌──┐
+	//   |>$|  SlopCost
+	//   └──┘  v0.0.1 · report-name
+	brand(subtitle: string): string[] {
+		return [
+			'  ┌──┐',
+			'  |>$|  SlopCost',
+			`  └──┘  ${subtitle}`,
+		];
+	},
+
+	hr(): string { return HR; },
+	blank(): string { return ''; },
+
+	// ··· between sections
+	sep(): string { return '  ···'; },
+
+	// lowercase label  value
+	field(label: string, value: string): string {
+		return `  ${label.padEnd(13)}${value}`;
+	},
+
+	// section heading (no ▸ — clean lowercase)
+	section(title: string): string { return `  ${title}`; },
+
+	// 1  item text  (space-separated, not dot-separated)
+	listItem(i: number, text: string): string {
+		return `  ${i + 1}  ${text}`;
+	},
+
+	// Plain text line (used for summary, hints)
+	hint(text: string): string { return `  ${text}`; },
+
+	// Tabular layout — by-model
+	tableHeader(): string {
+		return `  ${'model'.padEnd(26)}${'cost'.padEnd(11)}${'tokens'.padEnd(10)}reqs`;
+	},
+	tableDivider(): string {
+		return `  ${'·'.repeat(24)}  ${'·'.repeat(9)}  ${'·'.repeat(8)}  ${'·'.repeat(4)}`;
+	},
+	tableRow(model: string, cost: string, tokens: string, reqs: string): string {
+		return `  ${model.substring(0, 25).padEnd(26)}${cost.padEnd(11)}${tokens.padEnd(10)}${reqs}`;
+	},
+
+	// Tabular layout — by-endpoint
+	endpointHeader(): string {
+		return `  ${'endpoint'.padEnd(32)}${'cost'.padEnd(11)}${'tokens'.padEnd(10)}reqs`;
+	},
+	endpointRow(ep: string, cost: string, tokens: string, reqs: string): string {
+		return `  ${ep.substring(0, 31).padEnd(32)}${cost.padEnd(11)}${tokens.padEnd(10)}${reqs}`;
+	},
+
+	// Print lines and reveal channel
+	print(ch: vscode.OutputChannel, lines: string[]): void {
+		ch.clear();
+		lines.forEach(l => ch.appendLine(l));
+		ch.show(true);
+	},
+};
 
 // This method is called when your extension is activated
 // Your extension is activated the very first time the command is executed
@@ -166,33 +315,42 @@ export function activate(context: vscode.ExtensionContext) {
 			outputChannel = vscode.window.createOutputChannel('Slop Cost');
 		}
 
+		const range = await pickDateRange();
+		if (!range) { return; } // cancelled
+
 		try {
-			const rows = await callApi<DailyCost[]>(context, '/analytics/daily-cost');
-			const today = getTodayDate();
-			const todayRow = rows.find(r => r.date === today);
+			const rows = await callApi<DailyCost[]>(
+				context,
+				`/analytics/daily-cost?start_date=${range.start}&end_date=${range.end}`
+			);
+			// Client-side filter as safety net
+			const filtered = rows.filter(r => inRange(r.date, range.start, range.end));
 
-			outputChannel.clear();
-			outputChannel.appendLine('=== AI Cost: Today\'s Summary ===');
-			outputChannel.appendLine('');
-
-			if (todayRow) {
-				outputChannel.appendLine(`Date:        ${todayRow.date}`);
-				outputChannel.appendLine(`Environment: ${todayRow.environment}`);
-				outputChannel.appendLine(`Total Cost:  $${todayRow.total_cost_usd}`);
-				outputChannel.appendLine(`Tokens Used: ${todayRow.total_tokens.toLocaleString()}`);
-				outputChannel.appendLine(`Requests:    ${todayRow.request_count.toLocaleString()}`);
+			const lines: string[] = [
+				...fmt.brand(`v0.0.1 · daily-cost · ${range.label}`),
+				fmt.hr(),
+				fmt.blank(),
+			];
+			if (filtered.length === 0) {
+				lines.push(fmt.hint(`no cost data found for ${range.label}.`));
 			} else {
-				outputChannel.appendLine(`No cost data recorded for ${today} yet.`);
-				if (rows.length > 0) {
-					const latest = rows[rows.length - 1];
-					outputChannel.appendLine('');
-					outputChannel.appendLine(`Latest available: ${latest.date}  —  $${latest.total_cost_usd}`);
-				}
+				filtered.forEach((row, i) => {
+					if (i > 0) { lines.push(fmt.blank()); }
+					lines.push(
+						fmt.field('date', row.date),
+						fmt.field('environment', row.environment),
+						fmt.field('total cost', `$${row.total_cost_usd} USD`),
+						fmt.field('tokens used', row.total_tokens.toLocaleString()),
+						fmt.field('requests', row.request_count.toLocaleString()),
+					);
+				});
 			}
-
-			outputChannel.appendLine('');
-			outputChannel.appendLine('================================');
-			outputChannel.show(true);
+			lines.push(
+				fmt.blank(),
+				fmt.hr(),
+				fmt.hint("run  SlopCost: Explain Today's Cost  for a breakdown"),
+			);
+			fmt.print(outputChannel, lines);
 		} catch {
 			// callApi already shows user-facing errors
 		}
@@ -207,27 +365,122 @@ export function activate(context: vscode.ExtensionContext) {
 			const date = getTodayDate();
 			const data = await callApi<CostExplanation>(context, `/ai/explain/daily-cost?date=${date}&environment=dev`);
 
-			outputChannel.clear();
-			outputChannel.appendLine('=== AI Cost: Explanation ===');
-			outputChannel.appendLine('');
-			outputChannel.appendLine(`Date:        ${data.date}`);
-			outputChannel.appendLine(`Environment: ${data.environment}`);
-			outputChannel.appendLine('');
-			outputChannel.appendLine('Summary:');
-			outputChannel.appendLine(`  ${data.summary}`);
-			outputChannel.appendLine('');
-			outputChannel.appendLine('Key Drivers:');
-			data.key_drivers.forEach((driver, i) => {
-				outputChannel.appendLine(`  ${i + 1}. ${driver}`);
-			});
-			outputChannel.appendLine('');
-			outputChannel.appendLine('Recommendations:');
-			data.recommendations.forEach((rec, i) => {
-				outputChannel.appendLine(`  ${i + 1}. ${rec}`);
-			});
-			outputChannel.appendLine('');
-			outputChannel.appendLine('============================');
-			outputChannel.show(true);
+			const lines: string[] = [
+				...fmt.brand(`v0.0.1 · explain-cost · ${data.date}`),
+				fmt.hr(),
+				fmt.blank(),
+				fmt.section('summary'),
+				fmt.hint(data.summary),
+				fmt.blank(),
+				fmt.sep(),
+				fmt.blank(),
+				fmt.section('key drivers'),
+				...data.key_drivers.map((d, i) => fmt.listItem(i, d)),
+				fmt.blank(),
+				fmt.sep(),
+				fmt.blank(),
+				fmt.section('recommendations'),
+				...data.recommendations.map((r, i) => fmt.listItem(i, r)),
+				fmt.blank(),
+				fmt.hr(),
+			];
+			fmt.print(outputChannel, lines);
+		} catch {
+			// callApi already shows user-facing errors
+		}
+	});
+
+	// ── Show Cost By Model ───────────────────────────────
+	const showByModelCmd = vscode.commands.registerCommand('aiCost.showByModel', async () => {
+		if (!outputChannel) {
+			outputChannel = vscode.window.createOutputChannel('Slop Cost');
+		}
+
+		const range = await pickDateRange();
+		if (!range) { return; }
+
+		try {
+			const rows = await callApi<CostByModel[]>(
+				context,
+				`/analytics/by-model?start_date=${range.start}&end_date=${range.end}`
+			);
+			const filtered = rows.filter(r => inRange(r.date, range.start, range.end));
+			const lines: string[] = [
+				...fmt.brand(`v0.0.1 · by-model · ${range.label}`),
+				fmt.hr(),
+				fmt.blank(),
+			];
+			if (filtered.length === 0) {
+				lines.push(fmt.hint('no data found for this range.'));
+			} else {
+				lines.push(fmt.tableHeader(), fmt.tableDivider());
+				filtered.forEach(row => {
+					lines.push(fmt.tableRow(
+						row.model_name,
+						`$${parseFloat(row.total_cost_usd).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 4 })}`,
+						row.total_tokens.toLocaleString(),
+						row.request_count.toLocaleString(),
+					));
+				});
+				// Totals row
+				const totalCost = filtered.reduce((s, r) => s + parseFloat(r.total_cost_usd), 0);
+				const totalTokens = filtered.reduce((s, r) => s + r.total_tokens, 0);
+				const totalReqs = filtered.reduce((s, r) => s + r.request_count, 0);
+				lines.push(
+					fmt.tableDivider(),
+					fmt.tableRow('total', `$${totalCost.toFixed(4)}`, totalTokens.toLocaleString(), totalReqs.toLocaleString()),
+				);
+			}
+			lines.push(fmt.blank(), fmt.hr());
+			fmt.print(outputChannel, lines);
+		} catch {
+			// callApi already shows user-facing errors
+		}
+	});
+
+	// ── Show Cost By Endpoint ────────────────────────────
+	const showByEndpointCmd = vscode.commands.registerCommand('aiCost.showByEndpoint', async () => {
+		if (!outputChannel) {
+			outputChannel = vscode.window.createOutputChannel('Slop Cost');
+		}
+
+		const range = await pickDateRange();
+		if (!range) { return; }
+
+		try {
+			const rows = await callApi<CostByEndpoint[]>(
+				context,
+				`/analytics/by-endpoint?start_date=${range.start}&end_date=${range.end}`
+			);
+			const filtered = rows.filter(r => inRange(r.date, range.start, range.end));
+			const lines: string[] = [
+				...fmt.brand(`v0.0.1 · by-endpoint · ${range.label}`),
+				fmt.hr(),
+				fmt.blank(),
+			];
+			if (filtered.length === 0) {
+				lines.push(fmt.hint('no data found for this range.'));
+			} else {
+				lines.push(fmt.endpointHeader(), fmt.tableDivider());
+				filtered.forEach(row => {
+					lines.push(fmt.endpointRow(
+						row.endpoint,
+						`$${parseFloat(row.total_cost_usd).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 4 })}`,
+						row.total_tokens.toLocaleString(),
+						row.request_count.toLocaleString(),
+					));
+				});
+				// Totals row
+				const totalCost = filtered.reduce((s, r) => s + parseFloat(r.total_cost_usd), 0);
+				const totalTokens = filtered.reduce((s, r) => s + r.total_tokens, 0);
+				const totalReqs = filtered.reduce((s, r) => s + r.request_count, 0);
+				lines.push(
+					fmt.tableDivider(),
+					fmt.endpointRow('total', `$${totalCost.toFixed(4)}`, totalTokens.toLocaleString(), totalReqs.toLocaleString()),
+				);
+			}
+			lines.push(fmt.blank(), fmt.hr());
+			fmt.print(outputChannel, lines);
 		} catch {
 			// callApi already shows user-facing errors
 		}
@@ -235,12 +488,12 @@ export function activate(context: vscode.ExtensionContext) {
 
 	// ── Configure Available Models ─────────────────────────
 	const configModelsCmd = vscode.commands.registerCommand('aiCost.configureAvailableModels', async () => {
-		// Build flat deduplicated list from catalog
 		const allModels = [...new Set(Object.values(MODEL_CATALOG).flat())];
+		const currentEnabled = getEnabledModels(context);
 
 		const items = allModels.map(model => ({
 			label: model,
-			picked: true,
+			picked: currentEnabled.includes(model),
 		}));
 
 		const selected = await vscode.window.showQuickPick(items, {
@@ -250,15 +503,32 @@ export function activate(context: vscode.ExtensionContext) {
 			ignoreFocusOut: true,
 		});
 
-		if (selected) {
-			const count = selected.length;
-			vscode.window.showInformationMessage(
-				`${count} model${count === 1 ? '' : 's'} selected: ${selected.map(s => s.label).join(', ')}`
-			);
-		}
+		if (!selected) { return; } // cancelled — keep existing config
+
+		const newEnabled = selected.map(s => s.label);
+		// If user deselects everything, fall back to defaults silently
+		const toStore = newEnabled.length > 0 ? newEnabled : DEFAULT_ENABLED_MODELS;
+		await context.globalState.update(ENABLED_MODELS_KEY, toStore);
+
+		const count = toStore.length;
+		vscode.window.showInformationMessage(
+			`SlopCost: ${count} model${count === 1 ? '' : 's'} enabled.`
+		);
+
+		// Immediately refresh recommendation with new model set
+		updateRecommendation();
 	});
 
-	context.subscriptions.push(disposable, showTodayCostCmd, explainTodayCostCmd, configModelsCmd);
+	context.subscriptions.push(
+		disposable, showTodayCostCmd, explainTodayCostCmd,
+		showByModelCmd, showByEndpointCmd, configModelsCmd
+	);
+
+	// ── Activity Bar: TreeView ────────────────────────────────
+	const treeProvider = new SlopCostTreeDataProvider();
+	context.subscriptions.push(
+		vscode.window.registerTreeDataProvider('slopcost.overview', treeProvider)
+	);
 
 	// ── Status Bar: Model Recommendation ──────────────────
 
@@ -306,7 +576,8 @@ export function activate(context: vscode.ExtensionContext) {
 		}
 
 		const features = extractPromptFeatures(text);
-		const rec = recommendModel(features);
+		const enabledModels = getEnabledModels(context);
+		const rec = recommendModel(features, enabledModels);
 
 		// Keep status bar text short; tooltip has full detail
 		const shortReason = rec.reason.length > 30
@@ -321,6 +592,7 @@ export function activate(context: vscode.ExtensionContext) {
 			`Based on: ${source}`,
 			'',
 			`Tokens: ~${features.estimatedTokens} | Intent: ${features.intent}`,
+			`Enabled models: ${enabledModels.length}`,
 		].join('\n');
 	}
 
@@ -460,11 +732,11 @@ function extractPromptFeatures(text: string): PromptFeatures {
 // Top-down priority: first matching rule wins.
 // No ML, no network — deterministic mapping from features to model.
 
-function recommendModel(features: PromptFeatures): ModelRecommendation {
+function recommendModel(features: PromptFeatures, enabledModels: string[]): ModelRecommendation {
 	// Rule 1: Complex reasoning demands the most capable model
 	if (features.reasoningLevel === 'high') {
 		return {
-			model: pickFromCategory('HIGH_REASONING'),
+			model: pickFromCategory('HIGH_REASONING', enabledModels),
 			reason: 'High reasoning depth detected',
 			confidence: 'high',
 		};
@@ -473,7 +745,7 @@ function recommendModel(features: PromptFeatures): ModelRecommendation {
 	// Rule 2: Code-related tasks benefit from code-optimized models
 	if (features.hasCode || features.intent === 'debug') {
 		return {
-			model: pickFromCategory('CODE'),
+			model: pickFromCategory('CODE', enabledModels),
 			reason: 'Code-related or debugging task',
 			confidence: 'medium',
 		};
@@ -482,7 +754,7 @@ function recommendModel(features: PromptFeatures): ModelRecommendation {
 	// Rule 3: Short, latency-sensitive prompts → fastest model
 	if (features.latencySensitive && features.estimatedTokens < 300) {
 		return {
-			model: pickFromCategory('FAST'),
+			model: pickFromCategory('FAST', enabledModels),
 			reason: 'Short prompt with low latency requirement',
 			confidence: 'high',
 		};
@@ -491,7 +763,7 @@ function recommendModel(features: PromptFeatures): ModelRecommendation {
 	// Rule 4: Summarization is well-suited for fast models
 	if (features.intent === 'summarize') {
 		return {
-			model: pickFromCategory('FAST'),
+			model: pickFromCategory('FAST', enabledModels),
 			reason: 'Summarization task',
 			confidence: 'medium',
 		};
@@ -499,8 +771,80 @@ function recommendModel(features: PromptFeatures): ModelRecommendation {
 
 	// Fallback: general-purpose default
 	return {
-		model: pickFromCategory('GENERAL'),
+		model: pickFromCategory('GENERAL', enabledModels),
 		reason: 'General-purpose default',
 		confidence: 'low',
 	};
+}
+
+// ── Activity Bar: SlopCost Panel ──────────────────────────────────────
+// Static tree of 4 action nodes — each one fires an existing command.
+// This is the skeleton; dynamic data (live cost, model stats) can hang
+// off these same nodes in future iterations.
+
+class SlopCostItem extends vscode.TreeItem {
+	constructor(
+		label: string,
+		icon: string,
+		commandId: string,
+		description?: string
+	) {
+		super(label, vscode.TreeItemCollapsibleState.None);
+		this.iconPath = new vscode.ThemeIcon(icon);
+		this.description = description;
+		this.command = {
+			command: commandId,
+			title: label,
+		};
+		this.tooltip = label;
+	}
+}
+
+class SlopCostTreeDataProvider implements vscode.TreeDataProvider<SlopCostItem> {
+	private readonly nodes: SlopCostItem[] = [
+		new SlopCostItem(
+			"Today's Cost",
+			'graph-line',
+			'aiCost.showTodayCost',
+			'View spend summary'
+		),
+		new SlopCostItem(
+			'Cost By Model',
+			'symbol-misc',
+			'aiCost.showByModel',
+			'Breakdown per model'
+		),
+		new SlopCostItem(
+			'Cost By Endpoint',
+			'symbol-interface',
+			'aiCost.showByEndpoint',
+			'Breakdown per endpoint'
+		),
+		new SlopCostItem(
+			'Explain Cost',
+			'sparkle',
+			'aiCost.explainTodayCost',
+			'AI-powered breakdown'
+		),
+		new SlopCostItem(
+			'Configure API Key',
+			'key',
+			'aiCost.configureApiKey',
+			'Set or update key'
+		),
+		new SlopCostItem(
+			'Configure Models',
+			'list-filter',
+			'aiCost.configureAvailableModels',
+			'Pick your available models'
+		),
+	];
+
+	getTreeItem(element: SlopCostItem): vscode.TreeItem {
+		return element;
+	}
+
+	getChildren(): SlopCostItem[] {
+		return this.nodes;
+	}
 }

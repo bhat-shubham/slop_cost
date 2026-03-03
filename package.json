@@ -30,6 +30,14 @@
       {
         "command": "aiCost.configureAvailableModels",
         "title": "SlopCost: Configure Available Models"
+      },
+      {
+        "command": "aiCost.showByModel",
+        "title": "SlopCost: Cost By Model"
+      },
+      {
+        "command": "aiCost.showByEndpoint",
+        "title": "SlopCost: Cost By Endpoint"
       }
     ],
     "viewsContainers": {
