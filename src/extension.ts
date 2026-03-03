@@ -168,6 +168,7 @@ type SessionState = {
 	categoryBreakdown: Record<CategoryKey, number>;  // count per category
 	weightedCategorySum: number;                        // sum of weights seen
 	startedAt: Date;
+	peakSlopScore: number;
 };
 
 function createSession(): SessionState {
@@ -177,6 +178,7 @@ function createSession(): SessionState {
 		categoryBreakdown: { HIGH_REASONING: 0, CODE: 0, FAST: 0, GENERAL: 0 },
 		weightedCategorySum: 0,
 		startedAt: new Date(),
+		peakSlopScore: 0,
 	};
 }
 
@@ -624,16 +626,19 @@ export function activate(context: vscode.ExtensionContext) {
 		if (slopScore === null) {
 			lines.push(fmt.body('slop score      not enough data yet (minimum 3 recommendations)'));
 		} else {
-			const label = slopScoreLabel(slopScore, warn, error);
-			if (slopScore >= error) {
-				lines.push(fmt.alertField('slop score', `${slopScore.toFixed(1)}  ${label}`));
+			lines.push(fmt.field("slop score (now)", slopScore?.toFixed(1) ?? "n/a"));
+			lines.push(fmt.field("slop score (peak)", session.peakSlopScore.toFixed(1)));
+
+			const label = slopScoreLabel(session.peakSlopScore, warn, error);
+			if (session.peakSlopScore >= error) {
 				lines.push(fmt.blank());
-				lines.push(fmt.hint('  heavy model usage detected — review category breakdown above'));
-				lines.push(fmt.hint('  consider: swap HIGH_REASONING tasks → CODE or FAST models'));
-			} else if (slopScore >= warn) {
-				lines.push(fmt.costField('slop score', `${slopScore.toFixed(1)}  ${label}`));
+				lines.push(fmt.alertField('slop status', label));
+				lines.push(fmt.hint('heavy model usage detected — review category breakdown above'));
+				lines.push(fmt.hint('consider: swap HIGH_REASONING tasks → CODE or FAST models'));
+			} else if (session.peakSlopScore >= warn) {
+				lines.push(fmt.costField('slop status', label));
 			} else {
-				lines.push(fmt.field('slop score', `${slopScore.toFixed(1)}  ${label}`));
+				lines.push(fmt.field('slop status', label));
 			}
 		}
 
@@ -748,17 +753,26 @@ export function activate(context: vscode.ExtensionContext) {
 
 		const slopScore = computeSlopScore(session);
 
+		if (slopScore !== null && slopScore > session.peakSlopScore) {
+			session.peakSlopScore = slopScore;
+		}
+
 		// Read thresholds from config (user-overridable via settings.json or .slopcost)
 		const config = vscode.workspace.getConfiguration('slopcost');
 		const warnThreshold = config.get<number>('thresholds.warning', 5.0);
 		const errorThreshold = config.get<number>('thresholds.error', 10.0);
 
+		// Colour driven by peak, not current — status bar never goes green mid-session
+		const scoreForColor = session.peakSlopScore > 0
+			? session.peakSlopScore
+			: (slopScore ?? 0);
+
 		if (slopScore === null) {
 			// Not enough data yet — stay neutral, hint in tooltip
 			statusBarItem.backgroundColor = undefined;
-		} else if (slopScore >= errorThreshold) {
+		} else if (scoreForColor >= errorThreshold) {
 			statusBarItem.backgroundColor = new vscode.ThemeColor('statusBarItem.errorBackground');
-		} else if (slopScore >= warnThreshold) {
+		} else if (scoreForColor >= warnThreshold) {
 			statusBarItem.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
 		} else {
 			statusBarItem.backgroundColor = undefined;
@@ -773,8 +787,8 @@ export function activate(context: vscode.ExtensionContext) {
 
 		// Tooltip construction
 		const scoreDisplay = slopScore === null
-			? 'Slop Score: gathering data... (3 recs minimum)'
-			: `Slop Score: ${slopScore.toFixed(1)}  ${slopScoreLabel(slopScore, warnThreshold, errorThreshold)}`;
+			? 'Slop Score: gathering data...'
+			: `Slop Score: ${slopScore.toFixed(1)}  (peak: ${session.peakSlopScore.toFixed(1)})`;
 
 		statusBarItem.tooltip = [
 			`Recommended model: ${rec.model}`,
@@ -948,7 +962,17 @@ function recommendModel(features: PromptFeatures, enabledModels: string[]): Mode
 		};
 	}
 
-	// Rule 3: Fast code task — code signal but user wants speed
+	// Rule 3 — lightweight explanation
+	if (features.intent === "explain" && features.latencySensitive) {
+		return {
+			model: pickFromCategory("FAST", enabledModels),
+			reason: "quick explanation",
+			confidence: "high",
+			category: "FAST"
+		};
+	}
+
+	// Rule 4: Fast code task — code signal but user wants speed
 	if ((features.hasCode || features.intent === 'debug') && features.latencySensitive) {
 		return {
 			model: pickFromCategory('FAST', enabledModels),
@@ -958,7 +982,7 @@ function recommendModel(features: PromptFeatures, enabledModels: string[]): Mode
 		};
 	}
 
-	// Rule 4: Standard code/debug — no speed constraint
+	// Rule 5: Standard code/debug — no speed constraint
 	if (features.hasCode || features.intent === 'debug') {
 		return {
 			model: pickFromCategory('CODE', enabledModels),
@@ -968,7 +992,7 @@ function recommendModel(features: PromptFeatures, enabledModels: string[]): Mode
 		};
 	}
 
-	// Rule 5: Explain intent — route by complexity
+	// Rule 6: Explain intent — route by complexity
 	if (features.intent === 'explain') {
 		const category = features.reasoningLevel === 'high' ? 'HIGH_REASONING' : 'GENERAL';
 		return {
@@ -979,7 +1003,7 @@ function recommendModel(features: PromptFeatures, enabledModels: string[]): Mode
 		};
 	}
 
-	// Rule 6: Summarize or short latency-sensitive → fast
+	// Rule 7: Summarize or short latency-sensitive → fast
 	if (features.intent === 'summarize' || features.latencySensitive) {
 		return {
 			model: pickFromCategory('FAST', enabledModels),
@@ -992,7 +1016,9 @@ function recommendModel(features: PromptFeatures, enabledModels: string[]): Mode
 	// Fallback
 	return {
 		model: pickFromCategory('GENERAL', enabledModels),
-		reason: 'No strong signal detected — try being more explicit',
+		reason: features.estimatedTokens > 100
+			? "general task"
+			: "no strong signal — try being specific",
 		confidence: 'low',
 		category: 'GENERAL',
 	};
