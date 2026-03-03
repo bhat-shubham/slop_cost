@@ -17,21 +17,39 @@
     "commands": [
       {
         "command": "aiCost.configureApiKey",
-        "title": "AI Cost: Configure API Key"
+        "title": "SlopCost: Configure API Key"
       },
       {
         "command": "aiCost.showTodayCost",
-        "title": "AI Cost: Show Today's Cost"
+        "title": "SlopCost: Show Today's Cost"
       },
       {
         "command": "aiCost.explainTodayCost",
-        "title": "AI Cost: Explain Today's Cost"
+        "title": "SlopCost: Explain Today's Cost"
       },
       {
         "command": "aiCost.configureAvailableModels",
-        "title": "AI Cost: Configure Available Models"
+        "title": "SlopCost: Configure Available Models"
       }
-    ]
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "slopcost",
+          "title": "SlopCost",
+          "icon": "media/slopcost-icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "slopcost": [
+        {
+          "id": "slopcost.overview",
+          "name": "Overview",
+          "icon": "media/slopcost-icon.svg"
+        }
+      ]
+    }
   },
   "scripts": {
     "vscode:prepublish": "npm run compile",

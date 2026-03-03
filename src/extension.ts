@@ -262,8 +262,8 @@ export function activate(context: vscode.ExtensionContext) {
 
 	// ── Status Bar: Model Recommendation ──────────────────
 
-	statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
-	statusBarItem.text = '$(lightbulb) AI Model: Waiting for prompt...';
+	statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
+	statusBarItem.text = '$(lightbulb) SlopCost: Waiting for prompt...';
 	statusBarItem.tooltip = 'Open a file and start typing to get a model recommendation.';
 	statusBarItem.show();
 	context.subscriptions.push(statusBarItem);
@@ -275,7 +275,7 @@ export function activate(context: vscode.ExtensionContext) {
 
 		// No editor open → idle state
 		if (!editor) {
-			statusBarItem.text = '$(lightbulb) AI Model: No editor open';
+			statusBarItem.text = '$(lightbulb) SlopCost: No editor open';
 			statusBarItem.tooltip = 'Open a file and start typing to get a model recommendation.';
 			return;
 		}
@@ -293,14 +293,14 @@ export function activate(context: vscode.ExtensionContext) {
 
 		// Empty → waiting state
 		if (text.length === 0) {
-			statusBarItem.text = '$(lightbulb) AI Model: Start typing...';
+			statusBarItem.text = '$(lightbulb) SlopCost: Start typing...';
 			statusBarItem.tooltip = 'Type a prompt or code to get a real-time model recommendation.';
 			return;
 		}
 
 		// Too short to meaningfully analyze (< 10 chars)
 		if (text.length < 10) {
-			statusBarItem.text = '$(lightbulb) AI Model: Keep typing...';
+			statusBarItem.text = '$(lightbulb) SlopCost: Keep typing...';
 			statusBarItem.tooltip = 'Need a bit more text for an accurate recommendation.';
 			return;
 		}
@@ -313,7 +313,7 @@ export function activate(context: vscode.ExtensionContext) {
 			? rec.reason.substring(0, 27) + '...'
 			: rec.reason;
 
-		statusBarItem.text = `$(lightbulb) AI Model: ${rec.model} (${shortReason})`;
+		statusBarItem.text = `$(lightbulb) SlopCost: ${rec.model} (${shortReason})`;
 		statusBarItem.tooltip = [
 			`Recommended model: ${rec.model}`,
 			`Reason: ${rec.reason}`,
