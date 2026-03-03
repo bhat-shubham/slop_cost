@@ -926,53 +926,85 @@ function extractPromptFeatures(text: string): PromptFeatures {
 // No ML, no network — deterministic mapping from features to model.
 
 function recommendModel(features: PromptFeatures, enabledModels: string[]): ModelRecommendation {
-	// Rule 1: Complex reasoning demands the most capable model
-	if (features.reasoningLevel === 'high') {
+
+	// Rule 1: Explicit deep reasoning keywords — true high reasoning signal
+	// NOT triggered by token count alone — length ≠ complexity
+	if (features.reasoningLevel === 'high' && !isLongButSimple(features)) {
 		return {
 			model: pickFromCategory('HIGH_REASONING', enabledModels),
-			reason: 'High reasoning depth detected',
+			reason: 'Deep reasoning or analysis requested',
 			confidence: 'high',
 			category: 'HIGH_REASONING',
 		};
 	}
 
-	// Rule 2: Code-related tasks benefit from code-optimized models
+	// Rule 2: Code generation — stronger signal than generic code presence
+	if (features.intent === 'generate' && features.hasCode) {
+		return {
+			model: pickFromCategory('CODE', enabledModels),
+			reason: 'Code generation task',
+			confidence: 'high',
+			category: 'CODE',
+		};
+	}
+
+	// Rule 3: Fast code task — code signal but user wants speed
+	if ((features.hasCode || features.intent === 'debug') && features.latencySensitive) {
+		return {
+			model: pickFromCategory('FAST', enabledModels),
+			reason: 'Quick code or debug task',
+			confidence: 'medium',
+			category: 'FAST',
+		};
+	}
+
+	// Rule 4: Standard code/debug — no speed constraint
 	if (features.hasCode || features.intent === 'debug') {
 		return {
 			model: pickFromCategory('CODE', enabledModels),
-			reason: 'Code-related or debugging task',
+			reason: 'Code or debugging task',
 			confidence: 'medium',
 			category: 'CODE',
 		};
 	}
 
-	// Rule 3: Short, latency-sensitive prompts → fastest model
-	if (features.latencySensitive && features.estimatedTokens < 300) {
+	// Rule 5: Explain intent — route by complexity
+	if (features.intent === 'explain') {
+		const category = features.reasoningLevel === 'high' ? 'HIGH_REASONING' : 'GENERAL';
+		return {
+			model: pickFromCategory(category, enabledModels),
+			reason: 'Explanation task',
+			confidence: 'medium',
+			category,
+		};
+	}
+
+	// Rule 6: Summarize or short latency-sensitive → fast
+	if (features.intent === 'summarize' || features.latencySensitive) {
 		return {
 			model: pickFromCategory('FAST', enabledModels),
-			reason: 'Short prompt with low latency requirement',
+			reason: features.intent === 'summarize' ? 'Summarization task' : 'Low-latency request',
 			confidence: 'high',
 			category: 'FAST',
 		};
 	}
 
-	// Rule 4: Summarization is well-suited for fast models
-	if (features.intent === 'summarize') {
-		return {
-			model: pickFromCategory('FAST', enabledModels),
-			reason: 'Summarization task',
-			confidence: 'medium',
-			category: 'FAST',
-		};
-	}
-
-	// Fallback: general-purpose default
+	// Fallback
 	return {
 		model: pickFromCategory('GENERAL', enabledModels),
-		reason: 'General-purpose default',
+		reason: 'No strong signal detected — try being more explicit',
 		confidence: 'low',
 		category: 'GENERAL',
 	};
+}
+
+// Helper: long token count alone doesn't mean complex reasoning
+function isLongButSimple(features: PromptFeatures): boolean {
+	return features.estimatedTokens > 800
+		&& features.intent !== 'other'
+		&& features.reasoningLevel === 'high'
+		&& !features.hasCode
+		&& !features.hasStackTrace;
 }
 
 // ── Activity Bar: SlopCost Panel ──────────────────────────────────────
