@@ -55,62 +55,51 @@ type ModelRecommendation = {
 	category: keyof typeof MODEL_CATALOG;
 };
 
+interface ModelMetadata {
+	id: string;
+	ideFocus: string[]; // Major IDE where this is a primary option
+	access: 'Free' | 'Paid' | 'BYOK';
+	categories: CategoryKey[];
+}
+
+// ── Model Directory ─────────────────────────────────────────────────────────
+const MODEL_DIRECTORY: ModelMetadata[] = [
+	// --- HIGH REASONING ---
+	{ id: 'claude-opus-4.6', ideFocus: ['Antigravity', 'Cursor'], access: 'Paid', categories: ['HIGH_REASONING'] },
+	{ id: 'claude-opus-4.5', ideFocus: ['Cursor', 'JetBrains'], access: 'Paid', categories: ['HIGH_REASONING'] },
+	{ id: 'gemini-3.1-pro', ideFocus: ['Antigravity', 'Windsurf'], access: 'Paid', categories: ['HIGH_REASONING', 'CODE'] },
+	{ id: 'gpt-5.2', ideFocus: ['Antigravity', 'Copilot'], access: 'Paid', categories: ['HIGH_REASONING'] },
+	{ id: 'o3', ideFocus: ['Copilot', 'Cursor'], access: 'Paid', categories: ['HIGH_REASONING'] },
+	{ id: 'gpt-5', ideFocus: ['Copilot'], access: 'Paid', categories: ['HIGH_REASONING'] },
+	{ id: 'gpt-oss-120b', ideFocus: ['Cursor', 'BYOK'], access: 'BYOK', categories: ['HIGH_REASONING'] },
+
+	// --- CODE & DEBUGGING ---
+	{ id: 'claude-sonnet-4.6', ideFocus: ['Antigravity', 'Cursor'], access: 'Paid', categories: ['CODE', 'GENERAL'] },
+	{ id: 'claude-sonnet-4.5', ideFocus: ['Cursor', 'Windsurf'], access: 'Paid', categories: ['CODE'] },
+	{ id: 'claude-sonnet-4', ideFocus: ['Cursor'], access: 'Paid', categories: ['CODE'] },
+	{ id: 'deepseek-v3', ideFocus: ['Cursor', 'BYOK'], access: 'Free', categories: ['CODE'] },
+	{ id: 'gemini-2.5-pro', ideFocus: ['JetBrains', 'Copilot'], access: 'Paid', categories: ['CODE'] },
+	{ id: 'gpt-4.1', ideFocus: ['Copilot'], access: 'Paid', categories: ['CODE', 'GENERAL'] },
+	{ id: 'gpt-5-mini', ideFocus: ['Copilot'], access: 'Paid', categories: ['CODE'] },
+	{ id: 'grok-code-fast-1', ideFocus: ['Copilot'], access: 'Paid', categories: ['CODE'] },
+
+	// --- FAST / LOW LATENCY ---
+	{ id: 'claude-haiku-4.5', ideFocus: ['Copilot', 'JetBrains'], access: 'Paid', categories: ['FAST'] },
+	{ id: 'gemini-3-flash', ideFocus: ['Antigravity', 'Windsurf'], access: 'Free', categories: ['FAST', 'GENERAL'] },
+	{ id: 'gemini-2.5-flash', ideFocus: ['JetBrains'], access: 'BYOK', categories: ['FAST'] },
+	{ id: 'gpt-4o-mini', ideFocus: ['Cursor', 'Copilot'], access: 'Free', categories: ['FAST'] },
+	{ id: 'grok-3-mini', ideFocus: ['Cursor'], access: 'Free', categories: ['FAST'] },
+	{ id: 'raptor-mini', ideFocus: ['Copilot'], access: 'Paid', categories: ['FAST'] },
+
+	// --- GENERAL ---
+	{ id: 'gpt-4o', ideFocus: ['Copilot'], access: 'Paid', categories: ['GENERAL'] },
+];
+
 const MODEL_CATALOG = {
-
-	// ── HIGH REASONING ───────────────────────────────────────
-	// Best for: "step by step", proofs, deep analysis, >800 token prompts.
-	// Most expensive tier — Slop Score weight: 4.
-	HIGH_REASONING: [
-		'claude-opus-4.6',       // Anthropic — current flagship; Feb 2026; 1M ctx; top SWE-bench
-		'claude-opus-4.5',       // Anthropic — 67% cheaper than prev Opus; strong coding + agents
-		'gemini-3.1-pro',        // Google    — #1 ARC-AGI-2 (77.1%); Feb 2026 preview; Deep Think
-		'gpt-5.2',               // OpenAI    — first perfect AIME; Dec 2025; frontier reasoning
-		'gpt-oss-120b',          // OpenAI    — open-weight 120B; Apache 2.0; self-hostable
-		'o3',                    // OpenAI    — reasoning-first; Cursor + Copilot agent mode
-		'gpt-5',                 // OpenAI    — Copilot Pro+; top general reasoning
-	],
-
-	// ── CODE & DEBUGGING ─────────────────────────────────────
-	// Best for: code generation, PR reviews, bug fixing, stack traces.
-	// Daily-driver tier — Slop Score weight: 3.
-	CODE: [
-		'claude-sonnet-4.6',     // Anthropic — Feb 2026; preferred over 4.5 by 70% devs; coding
-		'claude-sonnet-4.5',     // Anthropic — 77.2% SWE-bench; strong agentic + computer use
-		'claude-sonnet-4',       // Anthropic — Cursor default; reliable baseline
-		'deepseek-v3',           // DeepSeek  — free 0x credits in Cursor; strong at code
-		'gemini-2.5-pro',        // Google    — large ctx coding; JetBrains + Copilot
-		'gemini-3.1-pro',        // Google    — also excellent for hard code tasks (dual-listed)
-		'gpt-4.1',               // OpenAI    — Copilot default since Jun 2025; replaced gpt-4o
-		'gpt-5-mini',            // OpenAI    — Copilot auto-rotation; chain-of-thought
-		'gpt-oss-120b',          // OpenAI    — open-weight; strong code; self-hostable
-		'grok-code-fast-1',      // xAI       — Copilot (zero data retention); fast code tasks
-		'swe-1.5',               // Windsurf  — in-house agentic model; near Claude 4.5 perf
-	],
-
-	// ── FAST / LOW LATENCY ───────────────────────────────────
-	// Best for: short questions, inline completions, quick edits, "what is X".
-	// Prioritise speed over depth — Slop Score weight: 1.
-	FAST: [
-		'claude-haiku-4.5',      // Anthropic — fastest Claude; near-Sonnet-4 perf; Oct 2025
-		'gemini-3-flash',        // Google    — 78% SWE-bench at <5% of Pro cost; Dec 2025
-		'gemini-2.5-flash',      // Google    — fast + large ctx; JetBrains BYOK
-		'gpt-4o-mini',           // OpenAI    — cheap + fast; Cursor free tier (500 req/day)
-		'gpt-oss-120b',          // OpenAI    — low-latency config; open-weight
-		'grok-3-mini',           // xAI       — fast tier; Cursor free
-		'raptor-mini',           // GitHub    — Copilot in-house; completions + scripts
-		'swe-1-mini',            // Windsurf  — powers Windsurf Tab real-time completions
-	],
-
-	// ── GENERAL FALLBACK ─────────────────────────────────────
-	// For prompts where no strong signal is detected.
-	// Slop Score weight: 2.
-	GENERAL: [
-		'claude-sonnet-4.6',     // Anthropic — current balanced default; Feb 2026
-		'gemini-3-flash',        // Google    — fast + capable; broadly available free
-		'gpt-4.1',               // OpenAI    — Copilot + Visual Studio default
-		'gpt-4o',                // OpenAI    — legacy multimodal fallback; vision capable
-	],
-
+	HIGH_REASONING: MODEL_DIRECTORY.filter(m => m.categories.includes('HIGH_REASONING')).map(m => m.id),
+	CODE: MODEL_DIRECTORY.filter(m => m.categories.includes('CODE')).map(m => m.id),
+	FAST: MODEL_DIRECTORY.filter(m => m.categories.includes('FAST')).map(m => m.id),
+	GENERAL: MODEL_DIRECTORY.filter(m => m.categories.includes('GENERAL')).map(m => m.id),
 } as const;
 
 // Rotate through models using a time-based index (changes every minute)
@@ -649,34 +638,47 @@ export function activate(context: vscode.ExtensionContext) {
 
 	// ── Configure Available Models ─────────────────────────
 	const configModelsCmd = vscode.commands.registerCommand('aiCost.configureAvailableModels', async () => {
-		const allModels = [...new Set(Object.values(MODEL_CATALOG).flat())];
 		const currentEnabled = getEnabledModels(context);
 
-		const items = allModels.map(model => ({
-			label: model,
-			picked: currentEnabled.includes(model),
-		}));
+		// IDE Groups for cleaner navigation
+		const ideGroups = ['Antigravity', 'Cursor', 'Copilot', 'JetBrains', 'Windsurf', 'BYOK'];
+		const items: (vscode.QuickPickItem & { modelId?: string })[] = [];
+
+		for (const ide of ideGroups) {
+			items.push({
+				label: ide,
+				kind: vscode.QuickPickItemKind.Separator
+			});
+
+			const modelsInGroup = MODEL_DIRECTORY.filter(m => m.ideFocus.includes(ide));
+			for (const m of modelsInGroup) {
+				items.push({
+					label: m.id,
+					modelId: m.id,
+					description: `(${m.access})`,
+					picked: currentEnabled.includes(m.id),
+				});
+			}
+		}
 
 		const selected = await vscode.window.showQuickPick(items, {
 			canPickMany: true,
-			placeHolder: 'Select the AI models you have access to',
-			title: 'Configure Available Models',
+			placeHolder: 'Select models available in your current environment',
+			title: 'SlopCost: Configure Models',
 			ignoreFocusOut: true,
 		});
 
-		if (!selected) { return; } // cancelled — keep existing config
+		if (!selected) { return; }
 
-		const newEnabled = selected.map(s => s.label);
-		// If user deselects everything, fall back to defaults silently
+		const newEnabled = selected.map(s => s.modelId).filter((id): id is string => !!id);
 		const toStore = newEnabled.length > 0 ? newEnabled : DEFAULT_ENABLED_MODELS;
 		await context.globalState.update(ENABLED_MODELS_KEY, toStore);
 
 		const count = toStore.length;
 		vscode.window.showInformationMessage(
-			`SlopCost: ${count} model${count === 1 ? '' : 's'} enabled.`
+			`SlopCost: ${count} model${count === 1 ? '' : 's'} enabled across ${selected.length} selections.`
 		);
 
-		// Immediately refresh recommendation with new model set
 		updateRecommendation();
 	});
 
