@@ -339,7 +339,7 @@ export function activate(context: vscode.ExtensionContext) {
 					lines.push(
 						fmt.field('date', row.date),
 						fmt.field('environment', row.environment),
-						fmt.field('total cost', `$${row.total_cost_usd} USD`),
+						fmt.field('total cost', `$${Number(parseFloat(row.total_cost_usd).toFixed(4)).toString()} USD`),
 						fmt.field('tokens used', row.total_tokens.toLocaleString()),
 						fmt.field('requests', row.request_count.toLocaleString()),
 					);
@@ -417,7 +417,7 @@ export function activate(context: vscode.ExtensionContext) {
 				filtered.forEach(row => {
 					lines.push(fmt.tableRow(
 						row.model_name,
-						`$${parseFloat(row.total_cost_usd).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 4 })}`,
+						`$${Number(parseFloat(row.total_cost_usd).toFixed(4)).toString()}`,
 						row.total_tokens.toLocaleString(),
 						row.request_count.toLocaleString(),
 					));
@@ -428,7 +428,7 @@ export function activate(context: vscode.ExtensionContext) {
 				const totalReqs = filtered.reduce((s, r) => s + r.request_count, 0);
 				lines.push(
 					fmt.tableDivider(),
-					fmt.tableRow('total', `$${totalCost.toFixed(4)}`, totalTokens.toLocaleString(), totalReqs.toLocaleString()),
+					fmt.tableRow('total', `$${Number(totalCost.toFixed(4)).toString()}`, totalTokens.toLocaleString(), totalReqs.toLocaleString()),
 				);
 			}
 			lines.push(fmt.blank(), fmt.hr());
@@ -465,7 +465,7 @@ export function activate(context: vscode.ExtensionContext) {
 				filtered.forEach(row => {
 					lines.push(fmt.endpointRow(
 						row.endpoint,
-						`$${parseFloat(row.total_cost_usd).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 4 })}`,
+						`$${Number(parseFloat(row.total_cost_usd).toFixed(4)).toString()}`,
 						row.total_tokens.toLocaleString(),
 						row.request_count.toLocaleString(),
 					));
@@ -476,7 +476,7 @@ export function activate(context: vscode.ExtensionContext) {
 				const totalReqs = filtered.reduce((s, r) => s + r.request_count, 0);
 				lines.push(
 					fmt.tableDivider(),
-					fmt.endpointRow('total', `$${totalCost.toFixed(4)}`, totalTokens.toLocaleString(), totalReqs.toLocaleString()),
+					fmt.endpointRow('total', `$${Number(totalCost.toFixed(4)).toString()}`, totalTokens.toLocaleString(), totalReqs.toLocaleString()),
 				);
 			}
 			lines.push(fmt.blank(), fmt.hr());
@@ -579,6 +579,12 @@ export function activate(context: vscode.ExtensionContext) {
 		const enabledModels = getEnabledModels(context);
 		const rec = recommendModel(features, enabledModels);
 
+		// Slop Score calculation
+		const lineCount = Math.max(editor.document.lineCount, 1);
+		const multiplierMap = { low: 1, medium: 1.5, high: 2 };
+		const multiplier = multiplierMap[features.reasoningLevel];
+		const slopScore = (features.estimatedTokens / lineCount) * multiplier;
+
 		// Keep status bar text short; tooltip has full detail
 		const shortReason = rec.reason.length > 30
 			? rec.reason.substring(0, 27) + '...'
@@ -589,6 +595,7 @@ export function activate(context: vscode.ExtensionContext) {
 			`Recommended model: ${rec.model}`,
 			`Reason: ${rec.reason}`,
 			`Confidence: ${rec.confidence}`,
+			`Slop Score: ${slopScore.toFixed(1)}`,
 			`Based on: ${source}`,
 			'',
 			`Tokens: ~${features.estimatedTokens} | Intent: ${features.intent}`,
