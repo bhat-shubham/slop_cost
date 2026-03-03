@@ -1,6 +1,6 @@
-// The module 'vscode' contains the VS Code extensibility API
-// Import the module and reference it with the alias vscode in your code below
 import * as vscode from 'vscode';
+import * as http from 'http';
+import * as https from 'https';
 
 type DailyCost = {
 	date: string;
@@ -35,6 +35,9 @@ type CostByEndpoint = {
 	total_tokens: number;
 	request_count: number;
 };
+
+// ── Global Proxy State ──────────────────────────────────────
+let proxyServer: http.Server | null = null;
 
 // ── Types: Local Model Recommender ─────────────────────────
 
@@ -158,6 +161,7 @@ type SessionState = {
 	weightedCategorySum: number;                        // sum of weights seen
 	startedAt: Date;
 	peakSlopScore: number;
+	fileBreakdown: Map<string, { tokens: number; recommendations: number }>;
 };
 
 function createSession(): SessionState {
@@ -168,6 +172,7 @@ function createSession(): SessionState {
 		weightedCategorySum: 0,
 		startedAt: new Date(),
 		peakSlopScore: 0,
+		fileBreakdown: new Map(),
 	};
 }
 
@@ -612,6 +617,19 @@ export function activate(context: vscode.ExtensionContext) {
 		lines.push(fmt.softDivider());
 		lines.push(fmt.blank());
 
+		fmt.sectionHead('by file (this session)');
+		const sortedFiles = [...session.fileBreakdown.entries()]
+			.sort((a, b) => b[1].tokens - a[1].tokens)  // heaviest first
+			.slice(0, 5);                                 // top 5 only — keep output clean
+
+		for (const [file, stats] of sortedFiles) {
+			lines.push(fmt.body(`  ${file.padEnd(30)} ${stats.tokens.toLocaleString().padStart(8)} tokens   ${stats.recommendations}x`));
+		}
+
+		lines.push(fmt.blank());
+		lines.push(fmt.softDivider());
+		lines.push(fmt.blank());
+
 		if (slopScore === null) {
 			lines.push(fmt.body('slop score      not enough data yet (minimum 3 recommendations)'));
 		} else {
@@ -682,10 +700,83 @@ export function activate(context: vscode.ExtensionContext) {
 		updateRecommendation();
 	});
 
+	// ── Local Proxy Configuration ────────────────────────────
+	const PROXY_PORT = vscode.workspace.getConfiguration('slopcost').get<number>('proxyPort', 9999);
+
+	const PROVIDER_TARGETS: Record<string, { host: string; port: number }> = {
+		'/anthropic': { host: 'api.anthropic.com', port: 443 },
+		'/openai': { host: 'api.openai.com', port: 443 },
+		'/google': { host: 'generativelanguage.googleapis.com', port: 443 },
+		'/groq': { host: 'api.groq.com', port: 443 },
+		'/deepseek': { host: 'api.deepseek.com', port: 443 },
+	};
+
+	// Compute workspace ID once — hashed, never the raw path
+	const workspaceId = (() => {
+		const raw = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? 'unknown';
+		let hash = 0;
+		for (let i = 0; i < raw.length; i++) {
+			hash = (Math.imul(31, hash) + raw.charCodeAt(i)) | 0;
+		}
+		return Math.abs(hash).toString(16);
+	})();
+
+	const startProxyCmd = vscode.commands.registerCommand('aiCost.startProxy', async () => {
+		if (proxyServer) {
+			vscode.window.showInformationMessage(`SlopCost proxy already running on port ${PROXY_PORT}.`);
+			return;
+		}
+
+		const handler = createProxyHandler(
+			context, session, statusBarItem, workspaceId, PROVIDER_TARGETS
+		);
+
+		proxyServer = http.createServer(handler);
+
+		proxyServer.listen(PROXY_PORT, '127.0.0.1', () => {
+			(async () => {
+				const msg = await vscode.window.showInformationMessage(
+					`SlopCost proxy running on 127.0.0.1:${PROXY_PORT}. Point your AI tool base URL at http://localhost:${PROXY_PORT}/{provider}`,
+					'Copy Anthropic URL', 'Copy OpenAI URL'
+				);
+				if (msg === 'Copy Anthropic URL') {
+					vscode.env.clipboard.writeText(`http://localhost:${PROXY_PORT}/anthropic`);
+				}
+				if (msg === 'Copy OpenAI URL') {
+					vscode.env.clipboard.writeText(`http://localhost:${PROXY_PORT}/openai`);
+				}
+			})();
+			statusBarItem.text = '$(radio-tower) SlopCost';
+		});
+
+		proxyServer.on('error', (err: any) => {
+			if (err.code === 'EADDRINUSE') {
+				vscode.window.showErrorMessage(
+					`Port ${PROXY_PORT} is in use. Change slopcost.proxyPort in settings.`
+				);
+			} else {
+				vscode.window.showErrorMessage(`SlopCost proxy error: ${err.message}`);
+			}
+			proxyServer = null;
+		});
+	});
+
+	const stopProxyCmd = vscode.commands.registerCommand('aiCost.stopProxy', () => {
+		if (!proxyServer) {
+			vscode.window.showInformationMessage('SlopCost proxy is not running.');
+			return;
+		}
+		proxyServer.close(() => {
+			proxyServer = null;
+			statusBarItem.text = 'SlopCost';
+			vscode.window.showInformationMessage('SlopCost proxy stopped.');
+		});
+	});
+
 	context.subscriptions.push(
 		disposable, showTodayCostCmd, explainTodayCostCmd,
 		showByModelCmd, showByEndpointCmd, configModelsCmd,
-		showSessionStatsCmd
+		showSessionStatsCmd, startProxyCmd, stopProxyCmd
 	);
 
 	// ── Activity Bar: TreeView ────────────────────────────────
@@ -704,7 +795,7 @@ export function activate(context: vscode.ExtensionContext) {
 
 	// ── Debounced Editor Listener ─────────────────────────
 
-	function updateRecommendation() {
+	async function updateRecommendation() {
 		const editor = vscode.window.activeTextEditor;
 
 		// No editor open → idle state
@@ -750,6 +841,41 @@ export function activate(context: vscode.ExtensionContext) {
 		session.recommendationCount += 1;
 		session.categoryBreakdown[rec.category] += 1;
 		session.weightedCategorySum += CATEGORY_WEIGHTS[rec.category];
+
+		// Per-file tracking
+		const fileName = editor.document.fileName;
+		const fileLabel = fileName.split(/[\\/]/).pop() ?? 'unknown'; // basename only
+		const existing = session.fileBreakdown.get(fileLabel) ?? { tokens: 0, recommendations: 0 };
+		session.fileBreakdown.set(fileLabel, {
+			tokens: existing.tokens + features.estimatedTokens,
+			recommendations: existing.recommendations + 1,
+		});
+
+		// ── Ingest to Backend ──────────────────────────────────────────────────────
+
+		// Ingest to backend if API key is configured — non-blocking
+		const apiKey = await context.secrets.get('aiCostOptimizer.apiKey');
+		if (apiKey) {
+			const workspaceId = (() => {
+				// Hash the workspace path — never send the raw path
+				const raw = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? 'unknown';
+				let hash = 0;
+				for (let i = 0; i < raw.length; i++) {
+					hash = (Math.imul(31, hash) + raw.charCodeAt(i)) | 0;
+				}
+				return Math.abs(hash).toString(16);
+			})();
+
+			ingestUsage(apiKey, {
+				model: rec.model,
+				category: rec.category,
+				tokens: features.estimatedTokens,
+				intent: features.intent,
+				workspaceId,
+				timestamp: new Date().toISOString(),
+			});
+			// Intentionally NOT awaited — fire and forget
+		}
 
 		// ── Slop Score ─────────────────────────────────────────────────────────────
 
@@ -831,7 +957,216 @@ export function activate(context: vscode.ExtensionContext) {
 }
 
 // This method is called when your extension is deactivated
-export function deactivate() { }
+export function deactivate() {
+	if (proxyServer) {
+		proxyServer.close();
+		proxyServer = null;
+	}
+}
+
+function createProxyHandler(
+	context: vscode.ExtensionContext,
+	session: SessionState,
+	statusBar: vscode.StatusBarItem,
+	workspaceId: string,
+	providerTargets: Record<string, { host: string; port: number }>
+): http.RequestListener {
+
+	return async (req: http.IncomingMessage, res: http.ServerResponse) => {
+		try {
+
+			// ── Route: determine provider from path prefix ────────────────────────
+			const urlPath = req.url ?? '/';
+			const provider = Object.keys(providerTargets).find(p => urlPath.startsWith(p));
+
+			if (!provider) {
+				res.writeHead(404);
+				res.end(JSON.stringify({
+					error: 'Unknown provider. Use /anthropic, /openai, /google, /groq, or /deepseek'
+				}));
+				return;
+			}
+
+			const target = providerTargets[provider];
+			const targetPath = urlPath.slice(provider.length) || '/';
+
+			// ── Collect request body ──────────────────────────────────────────────
+			// PRIVACY: parsed once to extract model name only. Buffer is forwarded
+			// to provider and then goes out of scope. Never stored anywhere.
+			const bodyChunks: Buffer[] = [];
+			for await (const chunk of req) {
+				bodyChunks.push(chunk as Buffer);
+			}
+			const bodyBuffer = Buffer.concat(bodyChunks);
+
+			// Extract model name only — never log or store the full body
+			let modelId = 'unknown';
+			try {
+				const parsed = JSON.parse(bodyBuffer.toString('utf8'));
+				modelId = typeof parsed.model === 'string' ? parsed.model : 'unknown';
+			} catch { /* non-JSON body — pass through */ }
+
+			// ── Forward to provider ───────────────────────────────────────────────
+			// PRIVACY: Authorization header is forwarded and never stored beyond
+			// this request handler's scope.
+			const options: https.RequestOptions = {
+				hostname: target.host,
+				port: target.port,
+				path: targetPath,
+				method: req.method,
+				headers: { ...req.headers, host: target.host },
+			};
+
+			const providerReq = https.request(options, (providerRes) => {
+
+				res.writeHead(providerRes.statusCode ?? 200, providerRes.headers);
+
+				const responseChunks: Buffer[] = [];
+
+				providerRes.on('data', (chunk: Buffer) => {
+					res.write(chunk);             // forward immediately to client
+					responseChunks.push(chunk);   // buffer for usage extraction only
+				});
+
+				providerRes.on('end', async () => {
+					res.end();
+
+					// ── Extract usage object ────────────────────────────────────────
+					// PRIVACY: we parse the response ONLY to find input/output token counts.
+					// Prompt text and response content are never read, stored, or forwarded
+					// anywhere other than back to the client.
+					let inputTokens = 0;
+					let outputTokens = 0;
+
+					try {
+						const fullBody = Buffer.concat(responseChunks).toString('utf8');
+
+						// Handle SSE streaming (Anthropic / OpenAI streaming)
+						const lines = fullBody.split('\n');
+						for (const line of lines) {
+							if (!line.startsWith('data: ')) { continue; }
+							const data = line.slice(6).trim();
+							if (data === '[DONE]') { continue; }
+							try {
+								const parsed = JSON.parse(data);
+								// Anthropic streaming: message_delta event contains usage
+								if (parsed.usage) {
+									inputTokens = parsed.usage.input_tokens ?? parsed.usage.prompt_tokens ?? inputTokens;
+									outputTokens = parsed.usage.output_tokens ?? parsed.usage.completion_tokens ?? outputTokens;
+								}
+							} catch { /* skip unparseable SSE lines */ }
+						}
+
+						// Non-streaming fallback (single JSON response)
+						if (inputTokens === 0) {
+							try {
+								const parsed = JSON.parse(fullBody);
+								if (parsed.usage) {
+									inputTokens = parsed.usage.input_tokens ?? parsed.usage.prompt_tokens ?? 0;
+									outputTokens = parsed.usage.output_tokens ?? parsed.usage.completion_tokens ?? 0;
+								}
+							} catch { /* not JSON — streaming already handled above */ }
+						}
+					} catch { /* response parse failed — skip ingest */ }
+
+					if (inputTokens === 0 && outputTokens === 0) { return; }
+
+					// ── Accumulate into session ────────────────────────────────────────
+					const totalTokens = inputTokens + outputTokens;
+					session.totalTokensEstimated += totalTokens;
+					session.recommendationCount += 1;
+					session.categoryBreakdown['CODE'] += 1;
+					session.weightedCategorySum += CATEGORY_WEIGHTS['CODE'];
+
+					// ── Estimate cost ──────────────────────────────────────────────────
+					const costUsd = estimateCost(modelId, inputTokens, outputTokens);
+
+					// ── Update status bar briefly ──────────────────────────────────────
+					const prev = statusBar.tooltip?.toString() ?? '';
+					statusBar.tooltip =
+						`⬤ Last tracked: ${modelId} · in:${inputTokens} out:${outputTokens} · $${costUsd.toFixed(5)}\n\n` + prev;
+
+					// ── Ingest to backend — fire and forget ────────────────────────────
+					// PRIVACY: only counts, model name, cost, hashed workspace ID.
+					// No prompt text. No response text. No API key.
+					const apiKey = await context.secrets.get('aiCostOptimizer.apiKey');
+					if (apiKey) {
+						ingestUsage(apiKey, {
+							model: modelId,
+							category: 'CODE',
+							tokens: totalTokens,
+							intent: 'proxied',
+							workspaceId,
+							timestamp: new Date().toISOString(),
+							costUsd,
+							inputTokens,
+							outputTokens,
+							tracked: true,
+						});
+					}
+				});
+
+				providerRes.on('error', () => { res.end(); });
+			});
+
+			providerReq.on('error', (err: any) => {
+				if (!res.headersSent) {
+					res.writeHead(502);
+					res.end(JSON.stringify({
+						error: 'SlopCost proxy could not reach provider',
+						detail: err.message
+					}));
+				}
+			});
+
+			providerReq.write(bodyBuffer);
+			providerReq.end();
+
+		} catch (err) {
+			// Catch-all — never leave the connection hanging
+			if (!res.headersSent) { res.writeHead(500); }
+			res.end();
+		}
+	};
+}
+
+function estimateCost(model: string, inputTokens: number, outputTokens: number): number {
+	// Crude estimation — v1 should use model-specific rates
+	const inputRate = 0.000003; // $/token
+	const outputRate = 0.000015; // $/token
+	return (inputTokens * inputRate) + (outputTokens * outputRate);
+}
+
+async function ingestUsage(
+	apiKey: string,
+	payload: {
+		model: string;
+		category: string;
+		tokens: number;
+		intent: string;
+		workspaceId: string;
+		timestamp: string;
+		costUsd?: number;
+		inputTokens?: number;
+		outputTokens?: number;
+		tracked?: boolean;
+	}
+): Promise<void> {
+	// Fire-and-forget — never await this from updateRecommendation()
+	// workspaceId is a safe non-reversible identifier — never the raw path
+	try {
+		await fetch('http://localhost:8000/ingest/usage', {
+			method: 'POST',
+			headers: {
+				'Content-Type': 'application/json',
+				'Authorization': `Bearer ${apiKey}`,
+			},
+			body: JSON.stringify(payload),
+		});
+	} catch {
+		// Silently swallow — backend being down must never affect the recommender
+	}
+}
 
 async function callApi<T>(
 	context: vscode.ExtensionContext,

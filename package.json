@@ -42,6 +42,14 @@
       {
         "command": "aiCost.showSessionStats",
         "title": "SlopCost: Show Session Stats"
+      },
+      {
+        "command": "aiCost.startProxy",
+        "title": "SlopCost: Start Proxy"
+      },
+      {
+        "command": "aiCost.stopProxy",
+        "title": "SlopCost: Stop Proxy"
       }
     ],
     "viewsContainers": {
@@ -67,13 +75,18 @@
       "properties": {
         "slopcost.thresholds.warning": {
           "type": "number",
-          "default": 5.0,
+          "default": 5,
           "description": "Slop Score threshold for warning (yellow) status bar color."
         },
         "slopcost.thresholds.error": {
           "type": "number",
-          "default": 10.0,
+          "default": 10,
           "description": "Slop Score threshold for error (red) status bar color."
+        },
+        "slopcost.proxyPort": {
+          "type": "number",
+          "default": 9999,
+          "description": "Local port for the SlopCost proxy. Change if 9999 is in use."
         }
       }
     }
@@ -87,13 +100,16 @@
     "test": "vscode-test"
   },
   "devDependencies": {
-    "@types/vscode": "^1.109.0",
     "@types/mocha": "^10.0.10",
     "@types/node": "22.x",
-    "typescript-eslint": "^8.54.0",
+    "@types/vscode": "^1.109.0",
+    "@vscode/test-cli": "^0.0.12",
+    "@vscode/test-electron": "^2.5.2",
     "eslint": "^9.39.2",
     "typescript": "^5.9.3",
-    "@vscode/test-cli": "^0.0.12",
-    "@vscode/test-electron": "^2.5.2"
+    "typescript-eslint": "^8.54.0"
+  },
+  "dependencies": {
+    "ps-node": "^0.1.6"
   }
 }
