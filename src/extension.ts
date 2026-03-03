@@ -52,6 +52,7 @@ type ModelRecommendation = {
 	model: string;
 	reason: string;
 	confidence: 'low' | 'medium' | 'high';
+	category: keyof typeof MODEL_CATALOG;
 };
 
 const MODEL_CATALOG = {
@@ -145,6 +146,65 @@ function getEnabledModels(context: vscode.ExtensionContext): string[] {
 let outputChannel: vscode.OutputChannel;
 let statusBarItem: vscode.StatusBarItem;
 let debounceTimer: ReturnType<typeof setTimeout> | undefined;
+
+// ─── Session Accumulator ─────────────────────────────────────────────────────
+// Tracks AI usage patterns across the current VS Code window session.
+// Resets on extension deactivation (intentional — session = this window).
+
+type CategoryKey = 'HIGH_REASONING' | 'CODE' | 'FAST' | 'GENERAL';
+
+// Weight reflects how "expensive" each category is relative to task complexity.
+// Used to compute a weighted average over the session.
+const CATEGORY_WEIGHTS: Record<CategoryKey, number> = {
+	HIGH_REASONING: 4,
+	CODE: 3,
+	GENERAL: 2,
+	FAST: 1,
+};
+
+type SessionState = {
+	totalTokensEstimated: number;
+	recommendationCount: number;
+	categoryBreakdown: Record<CategoryKey, number>;  // count per category
+	weightedCategorySum: number;                        // sum of weights seen
+	startedAt: Date;
+};
+
+function createSession(): SessionState {
+	return {
+		totalTokensEstimated: 0,
+		recommendationCount: 0,
+		categoryBreakdown: { HIGH_REASONING: 0, CODE: 0, FAST: 0, GENERAL: 0 },
+		weightedCategorySum: 0,
+		startedAt: new Date(),
+	};
+}
+
+// Compute Slop Score from accumulated session data.
+// Returns null if not enough data yet (< 3 recommendations).
+function computeSlopScore(session: SessionState): number | null {
+	if (session.recommendationCount < 3) {
+		return null;  // too early — score would be meaningless noise
+	}
+
+	// Tokens per recommendation — how much AI burn per discrete task
+	const tokensPerRec = session.totalTokensEstimated / session.recommendationCount;
+
+	// Average category weight — were recommendations skewing heavy or light?
+	const avgCategoryWeight = session.weightedCategorySum / session.recommendationCount;
+
+	// Score = token burn rate * category heaviness
+	// High score = burning lots of tokens on heavy models = slop
+	// Low score  = efficient use of cheap/fast models
+	return (tokensPerRec / 100) * avgCategoryWeight;
+	//      ↑ divide by 100 to keep the number human-readable (target range 0–20)
+}
+
+function slopScoreLabel(score: number, warn: number, error: number): string {
+	if (score >= error) { return '🔴 high slop — consider lighter models'; }
+	if (score >= warn) { return '🟡 moderate slop'; }
+	return '🟢 efficient';
+}
 
 function getTodayDate(): string {
 	return new Date().toISOString().split('T')[0];
@@ -272,6 +332,31 @@ const fmt = {
 		return `  ${ep.substring(0, 31).padEnd(32)}${cost.padEnd(11)}${tokens.padEnd(10)}${reqs}`;
 	},
 
+	header(title: string): string {
+		return `\n${HR}\n  ${title.toUpperCase()}\n${HR}`;
+	},
+	softDivider(): string {
+		return `  ${'·'.repeat(41)}`;
+	},
+	sectionHead(title: string): string {
+		return `  ${title.toLowerCase()}`;
+	},
+	warn(text: string): string {
+		return `  ! ${text}`;
+	},
+	body(text: string): string {
+		return `    ${text}`;
+	},
+	alertField(label: string, value: string): string {
+		return `  !! ${label.padEnd(13)}${value}`;
+	},
+	costField(label: string, value: string): string {
+		return `  $$ ${label.padEnd(13)}${value}`;
+	},
+	footer(text: string): string {
+		return `\n${HR}\n  ${text}\n${HR}\n`;
+	},
+
 	// Print lines and reveal channel
 	print(ch: vscode.OutputChannel, lines: string[]): void {
 		ch.clear();
@@ -287,6 +372,8 @@ export function activate(context: vscode.ExtensionContext) {
 	// Use the console to output diagnostic information (console.log) and errors (console.error)
 	// This line of code will only be executed once when your extension is activated
 	console.log('Congratulations, your extension "slopcost" is now active!');
+
+	let session = createSession();
 
 	const disposable = vscode.commands.registerCommand('aiCost.configureApiKey', async () => {
 		const apiKey = await vscode.window.showInputBox({
@@ -486,6 +573,75 @@ export function activate(context: vscode.ExtensionContext) {
 		}
 	});
 
+	// ── Show Session Stats ───────────────────────────────
+	const showSessionStatsCmd = vscode.commands.registerCommand('aiCost.showSessionStats', async () => {
+
+		const slopScore = computeSlopScore(session);
+		const config = vscode.workspace.getConfiguration('slopcost');
+		const warn = config.get<number>('thresholds.warning', 5.0);
+		const error = config.get<number>('thresholds.error', 10.0);
+
+		const durationMs = Date.now() - session.startedAt.getTime();
+		const durationMinutes = Math.floor(durationMs / 60_000);
+		const durationDisplay = durationMinutes < 1
+			? 'less than a minute'
+			: `${durationMinutes} min`;
+
+		if (!outputChannel) {
+			outputChannel = vscode.window.createOutputChannel('Slop Cost');
+		}
+
+		const lines: string[] = [];
+		lines.push(...fmt.brand(`v0.0.1 · session-stats · this window`));
+		lines.push(fmt.header('session efficiency'));
+
+		lines.push(fmt.field('duration', durationDisplay));
+		lines.push(fmt.field('recommendations', session.recommendationCount.toString()));
+		lines.push(fmt.field('tokens (est)', session.totalTokensEstimated.toLocaleString()));
+
+		lines.push(fmt.blank());
+		lines.push(fmt.softDivider());
+		lines.push(fmt.blank());
+
+		lines.push(fmt.sectionHead('category breakdown'));
+		for (const [cat, count] of Object.entries(session.categoryBreakdown)) {
+			if (count === 0) { continue; }
+			const pct = Math.round((count / session.recommendationCount) * 100);
+			const bar = '█'.repeat(Math.round(pct / 5)).padEnd(20);
+			const isHeavy = (cat === 'HIGH_REASONING' || cat === 'CODE') && pct > 50;
+			const row = `${cat.padEnd(16)} ${bar}  ${count}x  (${pct}%)`;
+			if (isHeavy) {
+				lines.push(fmt.warn(row));
+			} else {
+				lines.push(fmt.body(row));
+			}
+		}
+
+		lines.push(fmt.blank());
+		lines.push(fmt.softDivider());
+		lines.push(fmt.blank());
+
+		if (slopScore === null) {
+			lines.push(fmt.body('slop score      not enough data yet (minimum 3 recommendations)'));
+		} else {
+			const label = slopScoreLabel(slopScore, warn, error);
+			if (slopScore >= error) {
+				lines.push(fmt.alertField('slop score', `${slopScore.toFixed(1)}  ${label}`));
+				lines.push(fmt.blank());
+				lines.push(fmt.hint('  heavy model usage detected — review category breakdown above'));
+				lines.push(fmt.hint('  consider: swap HIGH_REASONING tasks → CODE or FAST models'));
+			} else if (slopScore >= warn) {
+				lines.push(fmt.costField('slop score', `${slopScore.toFixed(1)}  ${label}`));
+			} else {
+				lines.push(fmt.field('slop score', `${slopScore.toFixed(1)}  ${label}`));
+			}
+		}
+
+		lines.push(fmt.footer("run 'SlopCost: Show Today's Cost' for backend spend data"));
+
+		fmt.print(outputChannel, lines);
+	});
+
 	// ── Configure Available Models ─────────────────────────
 	const configModelsCmd = vscode.commands.registerCommand('aiCost.configureAvailableModels', async () => {
 		const allModels = [...new Set(Object.values(MODEL_CATALOG).flat())];
@@ -521,7 +677,8 @@ export function activate(context: vscode.ExtensionContext) {
 
 	context.subscriptions.push(
 		disposable, showTodayCostCmd, explainTodayCostCmd,
-		showByModelCmd, showByEndpointCmd, configModelsCmd
+		showByModelCmd, showByEndpointCmd, configModelsCmd,
+		showSessionStatsCmd
 	);
 
 	// ── Activity Bar: TreeView ────────────────────────────────
@@ -579,11 +736,33 @@ export function activate(context: vscode.ExtensionContext) {
 		const enabledModels = getEnabledModels(context);
 		const rec = recommendModel(features, enabledModels);
 
-		// Slop Score calculation
-		const lineCount = Math.max(editor.document.lineCount, 1);
-		const multiplierMap = { low: 1, medium: 1.5, high: 2 };
-		const multiplier = multiplierMap[features.reasoningLevel];
-		const slopScore = (features.estimatedTokens / lineCount) * multiplier;
+		// ── Session accumulation ───────────────────────────────────────────────────
+
+		// Accumulate this update into the session
+		session.totalTokensEstimated += features.estimatedTokens;
+		session.recommendationCount += 1;
+		session.categoryBreakdown[rec.category] += 1;
+		session.weightedCategorySum += CATEGORY_WEIGHTS[rec.category];
+
+		// ── Slop Score ─────────────────────────────────────────────────────────────
+
+		const slopScore = computeSlopScore(session);
+
+		// Read thresholds from config (user-overridable via settings.json or .slopcost)
+		const config = vscode.workspace.getConfiguration('slopcost');
+		const warnThreshold = config.get<number>('thresholds.warning', 5.0);
+		const errorThreshold = config.get<number>('thresholds.error', 10.0);
+
+		if (slopScore === null) {
+			// Not enough data yet — stay neutral, hint in tooltip
+			statusBarItem.backgroundColor = undefined;
+		} else if (slopScore >= errorThreshold) {
+			statusBarItem.backgroundColor = new vscode.ThemeColor('statusBarItem.errorBackground');
+		} else if (slopScore >= warnThreshold) {
+			statusBarItem.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
+		} else {
+			statusBarItem.backgroundColor = undefined;
+		}
 
 		// Keep status bar text short; tooltip has full detail
 		const shortReason = rec.reason.length > 30
@@ -591,15 +770,22 @@ export function activate(context: vscode.ExtensionContext) {
 			: rec.reason;
 
 		statusBarItem.text = `$(lightbulb) SlopCost: ${rec.model} (${shortReason})`;
+
+		// Tooltip construction
+		const scoreDisplay = slopScore === null
+			? 'Slop Score: gathering data... (3 recs minimum)'
+			: `Slop Score: ${slopScore.toFixed(1)}  ${slopScoreLabel(slopScore, warnThreshold, errorThreshold)}`;
+
 		statusBarItem.tooltip = [
 			`Recommended model: ${rec.model}`,
 			`Reason: ${rec.reason}`,
 			`Confidence: ${rec.confidence}`,
-			`Slop Score: ${slopScore.toFixed(1)}`,
 			`Based on: ${source}`,
 			'',
 			`Tokens: ~${features.estimatedTokens} | Intent: ${features.intent}`,
 			`Enabled models: ${enabledModels.length}`,
+			'',
+			scoreDisplay
 		].join('\n');
 	}
 
@@ -746,6 +932,7 @@ function recommendModel(features: PromptFeatures, enabledModels: string[]): Mode
 			model: pickFromCategory('HIGH_REASONING', enabledModels),
 			reason: 'High reasoning depth detected',
 			confidence: 'high',
+			category: 'HIGH_REASONING',
 		};
 	}
 
@@ -755,6 +942,7 @@ function recommendModel(features: PromptFeatures, enabledModels: string[]): Mode
 			model: pickFromCategory('CODE', enabledModels),
 			reason: 'Code-related or debugging task',
 			confidence: 'medium',
+			category: 'CODE',
 		};
 	}
 
@@ -764,6 +952,7 @@ function recommendModel(features: PromptFeatures, enabledModels: string[]): Mode
 			model: pickFromCategory('FAST', enabledModels),
 			reason: 'Short prompt with low latency requirement',
 			confidence: 'high',
+			category: 'FAST',
 		};
 	}
 
@@ -773,6 +962,7 @@ function recommendModel(features: PromptFeatures, enabledModels: string[]): Mode
 			model: pickFromCategory('FAST', enabledModels),
 			reason: 'Summarization task',
 			confidence: 'medium',
+			category: 'FAST',
 		};
 	}
 
@@ -781,6 +971,7 @@ function recommendModel(features: PromptFeatures, enabledModels: string[]): Mode
 		model: pickFromCategory('GENERAL', enabledModels),
 		reason: 'General-purpose default',
 		confidence: 'low',
+		category: 'GENERAL',
 	};
 }
 
@@ -826,6 +1017,12 @@ class SlopCostTreeDataProvider implements vscode.TreeDataProvider<SlopCostItem> 
 			'symbol-interface',
 			'aiCost.showByEndpoint',
 			'Breakdown per endpoint'
+		),
+		new SlopCostItem(
+			'Show Session Stats',
+			'history',
+			'aiCost.showSessionStats',
+			'Usage in this window'
 		),
 		new SlopCostItem(
 			'Explain Cost',

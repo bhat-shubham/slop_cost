@@ -38,6 +38,10 @@
       {
         "command": "aiCost.showByEndpoint",
         "title": "SlopCost: Cost By Endpoint"
+      },
+      {
+        "command": "aiCost.showSessionStats",
+        "title": "SlopCost: Show Session Stats"
       }
     ],
     "viewsContainers": {
@@ -57,6 +61,21 @@
           "icon": "media/slopcost-icon.svg"
         }
       ]
+    },
+    "configuration": {
+      "title": "SlopCost",
+      "properties": {
+        "slopcost.thresholds.warning": {
+          "type": "number",
+          "default": 5.0,
+          "description": "Slop Score threshold for warning (yellow) status bar color."
+        },
+        "slopcost.thresholds.error": {
+          "type": "number",
+          "default": 10.0,
+          "description": "Slop Score threshold for error (red) status bar color."
+        }
+      }
     }
   },
   "scripts": {
