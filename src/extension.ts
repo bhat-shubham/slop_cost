@@ -57,60 +57,60 @@ type ModelRecommendation = {
 
 const MODEL_CATALOG = {
 
+	// ── HIGH REASONING ───────────────────────────────────────
+	// Best for: "step by step", proofs, deep analysis, >800 token prompts.
+	// Most expensive tier — Slop Score weight: 4.
 	HIGH_REASONING: [
-		'claude-opus-4',              // Anthropic — flagship, 200K ctx, Cursor + Copilot + JetBrains
-		'claude-opus-4.5',            // Anthropic — improved Opus, Copilot preview + JetBrains BYOK
-		'claude-opus-4.6 (Thinking)', // Anthropic — extended thinking mode, Cursor paid
-		'gemini-3.1-pro (High)',      // Google    — #1 ARC-AGI-2 (77.1%), Copilot + Windsurf
-		'gemini-3-pro',               // Google    — Copilot public preview, Windsurf
-		'gpt-5',                      // OpenAI    — Copilot Pro+ + Cursor; top reasoning
-		'gpt-oss-120b (High)',        // OpenAI    — open-weight high-reasoning tier, Cursor
-		'o3',                         // OpenAI    — reasoning-first, Cursor + Copilot agent mode
+		'claude-opus-4.6',       // Anthropic — current flagship; Feb 2026; 1M ctx; top SWE-bench
+		'claude-opus-4.5',       // Anthropic — 67% cheaper than prev Opus; strong coding + agents
+		'gemini-3.1-pro',        // Google    — #1 ARC-AGI-2 (77.1%); Feb 2026 preview; Deep Think
+		'gpt-5.2',               // OpenAI    — first perfect AIME; Dec 2025; frontier reasoning
+		'gpt-oss-120b',          // OpenAI    — open-weight 120B; Apache 2.0; self-hostable
+		'o3',                    // OpenAI    — reasoning-first; Cursor + Copilot agent mode
+		'gpt-5',                 // OpenAI    — Copilot Pro+; top general reasoning
 	],
 
-	// ── CODE & DEBUGGING ────────────────────────────────────
+	// ── CODE & DEBUGGING ─────────────────────────────────────
 	// Best for: code generation, PR reviews, bug fixing, stack traces.
-	// The daily-driver tier — fast enough for flow, smart enough for hard bugs.
+	// Daily-driver tier — Slop Score weight: 3.
 	CODE: [
-		'claude-sonnet-4',              // Anthropic — default in Cursor, top SWE-bench
-		'claude-sonnet-4.5',            // Anthropic — improved Sonnet, Copilot + JetBrains BYOK
-		'claude-sonnet-4.6',            // Anthropic — latest Sonnet, Copilot (premium multiplier TBC)
-		'claude-sonnet-4.6 (Thinking)', // Anthropic — thinking mode for harder code tasks, Cursor
-		'deepseek-v3',                  // DeepSeek  — free 0x credits in Cursor; strong at code
-		'gemini-2.5-pro',               // Google    — Copilot + JetBrains; large ctx coding
-		'gemini-3-flash',               // Google    — 78% SWE-bench, free in Windsurf + Cursor
-		'gemini-3.1-pro (Low)',         // Google    — low-reasoning tier, speed/quality balance
-		'gpt-4.1',                      // OpenAI    — Copilot default (replaced GPT-4o Jun 2025)
-		'gpt-5-mini',                   // OpenAI    — Copilot auto-rotation model, chain-of-thought
-		'gpt-oss-120b (Medium)',        // OpenAI    — open-weight medium-reasoning, Cursor
-		'grok-code-fast-1',             // xAI       — Copilot (zero data retention), fast code tasks
-		'swe-1.5',                      // Windsurf  — in-house agentic model; near Claude 4.5 perf
+		'claude-sonnet-4.6',     // Anthropic — Feb 2026; preferred over 4.5 by 70% devs; coding
+		'claude-sonnet-4.5',     // Anthropic — 77.2% SWE-bench; strong agentic + computer use
+		'claude-sonnet-4',       // Anthropic — Cursor default; reliable baseline
+		'deepseek-v3',           // DeepSeek  — free 0x credits in Cursor; strong at code
+		'gemini-2.5-pro',        // Google    — large ctx coding; JetBrains + Copilot
+		'gemini-3.1-pro',        // Google    — also excellent for hard code tasks (dual-listed)
+		'gpt-4.1',               // OpenAI    — Copilot default since Jun 2025; replaced gpt-4o
+		'gpt-5-mini',            // OpenAI    — Copilot auto-rotation; chain-of-thought
+		'gpt-oss-120b',          // OpenAI    — open-weight; strong code; self-hostable
+		'grok-code-fast-1',      // xAI       — Copilot (zero data retention); fast code tasks
+		'swe-1.5',               // Windsurf  — in-house agentic model; near Claude 4.5 perf
 	],
 
 	// ── FAST / LOW LATENCY ───────────────────────────────────
 	// Best for: short questions, inline completions, quick edits, "what is X".
-	// Prioritise speed over depth — devs reach for these constantly.
+	// Prioritise speed over depth — Slop Score weight: 1.
 	FAST: [
-		'claude-haiku-4.5',    // Anthropic — fastest Claude, low latency, Copilot + JetBrains
-		'gemini-2.5-flash',    // Google    — fast + large ctx, JetBrains BYOK
-		'gemini-3-flash',      // Google    — 3× faster than Gemini 3 Pro, Windsurf free tier
-		'gpt-4o',              // OpenAI    — multimodal, VS Code Copilot (only vision model)
-		'gpt-4o-mini',         // OpenAI    — cheap + fast, Cursor free tier (500 req/day)
-		'gpt-oss-120b (Low)',  // OpenAI    — open-weight low-reasoning = lowest latency, Cursor
-		'grok-3-mini',         // xAI       — fast tier, Cursor free
-		'raptor-mini',         // GitHub    — Copilot in-house fast model for completions/scripts
-		'swe-1-mini',          // Windsurf  — powers Windsurf Tab real-time completions
+		'claude-haiku-4.5',      // Anthropic — fastest Claude; near-Sonnet-4 perf; Oct 2025
+		'gemini-3-flash',        // Google    — 78% SWE-bench at <5% of Pro cost; Dec 2025
+		'gemini-2.5-flash',      // Google    — fast + large ctx; JetBrains BYOK
+		'gpt-4o-mini',           // OpenAI    — cheap + fast; Cursor free tier (500 req/day)
+		'gpt-oss-120b',          // OpenAI    — low-latency config; open-weight
+		'grok-3-mini',           // xAI       — fast tier; Cursor free
+		'raptor-mini',           // GitHub    — Copilot in-house; completions + scripts
+		'swe-1-mini',            // Windsurf  — powers Windsurf Tab real-time completions
 	],
 
 	// ── GENERAL FALLBACK ─────────────────────────────────────
 	// For prompts where no strong signal is detected.
-	// Well-rounded models familiar to devs across all four IDEs.
+	// Slop Score weight: 2.
 	GENERAL: [
-		'claude-sonnet-4',   // Anthropic — Cursor default, broadly trusted
-		'gemini-3-flash',    // Google    — fast + capable, available free
-		'gpt-4.1',           // OpenAI    — Copilot + Visual Studio default
-		'gpt-5.1-codex',     // OpenAI    — Copilot codex model, strong at code + chat
+		'claude-sonnet-4.6',     // Anthropic — current balanced default; Feb 2026
+		'gemini-3-flash',        // Google    — fast + capable; broadly available free
+		'gpt-4.1',               // OpenAI    — Copilot + Visual Studio default
+		'gpt-4o',                // OpenAI    — legacy multimodal fallback; vision capable
 	],
+
 } as const;
 
 // Rotate through models using a time-based index (changes every minute)
