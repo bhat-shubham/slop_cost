@@ -202,6 +202,50 @@ function slopScoreLabel(score: number, warn: number, error: number): string {
 	return '🟢 efficient';
 }
 
+// ── Budget Configuration ─────────────────────────────────────────────
+
+type SlopCostConfig = {
+	dailyBudgetUsd: number;
+	weeklyBudgetUsd: number;
+	alertThresholdPct: number;
+	environment: string;
+};
+
+const DEFAULT_CONFIG: SlopCostConfig = {
+	dailyBudgetUsd: 1.00,
+	weeklyBudgetUsd: 5.00,
+	alertThresholdPct: 80,
+	environment: 'dev',
+};
+
+async function readSlopCostConfig(): Promise<SlopCostConfig> {
+	const vscConfig = vscode.workspace.getConfiguration('slopcost');
+
+	// Try .slopcost file in workspace root first
+	const files = await vscode.workspace.findFiles('.slopcost', null, 1);
+	if (files.length > 0) {
+		try {
+			const raw = await vscode.workspace.fs.readFile(files[0]);
+			const json = JSON.parse(Buffer.from(raw).toString('utf8'));
+			return {
+				dailyBudgetUsd: json.dailyBudgetUsd ?? vscConfig.get('budget.daily', DEFAULT_CONFIG.dailyBudgetUsd),
+				weeklyBudgetUsd: json.weeklyBudgetUsd ?? vscConfig.get('budget.weekly', DEFAULT_CONFIG.weeklyBudgetUsd),
+				alertThresholdPct: json.alertThresholdPct ?? vscConfig.get('budget.alertPct', DEFAULT_CONFIG.alertThresholdPct),
+				environment: json.environment ?? vscConfig.get('environment', DEFAULT_CONFIG.environment),
+			};
+		} catch {
+			// Malformed .slopcost — fall through to VS Code settings
+		}
+	}
+
+	return {
+		dailyBudgetUsd: vscConfig.get('budget.daily', DEFAULT_CONFIG.dailyBudgetUsd),
+		weeklyBudgetUsd: vscConfig.get('budget.weekly', DEFAULT_CONFIG.weeklyBudgetUsd),
+		alertThresholdPct: vscConfig.get('budget.alertPct', DEFAULT_CONFIG.alertThresholdPct),
+		environment: vscConfig.get('environment', DEFAULT_CONFIG.environment),
+	};
+}
+
 function getTodayDate(): string {
 	return new Date().toISOString().split('T')[0];
 }
@@ -402,8 +446,13 @@ export function activate(context: vscode.ExtensionContext) {
 		if (!range) { return; } // cancelled
 
 		try {
+			const apiKey = await context.secrets.get('aiCostOptimizer.apiKey');
+			if (!apiKey) {
+				vscode.window.showWarningMessage('SlopCost: No API key configured.');
+				return;
+			}
 			const rows = await callApi<DailyCost[]>(
-				context,
+				apiKey,
 				`/analytics/daily-cost?start_date=${range.start}&end_date=${range.end}`
 			);
 			// Client-side filter as safety net
@@ -446,7 +495,12 @@ export function activate(context: vscode.ExtensionContext) {
 
 		try {
 			const date = getTodayDate();
-			const data = await callApi<CostExplanation>(context, `/ai/explain/daily-cost?date=${date}&environment=dev`);
+			const apiKey = await context.secrets.get('aiCostOptimizer.apiKey');
+			if (!apiKey) {
+				vscode.window.showWarningMessage('SlopCost: No API key configured.');
+				return;
+			}
+			const data = await callApi<CostExplanation>(apiKey, `/ai/explain/daily-cost?date=${date}&environment=dev`);
 
 			const lines: string[] = [
 				...fmt.brand(`v0.0.1 · explain-cost · ${data.date}`),
@@ -483,8 +537,13 @@ export function activate(context: vscode.ExtensionContext) {
 		if (!range) { return; }
 
 		try {
+			const apiKey = await context.secrets.get('aiCostOptimizer.apiKey');
+			if (!apiKey) {
+				vscode.window.showWarningMessage('SlopCost: No API key configured.');
+				return;
+			}
 			const rows = await callApi<CostByModel[]>(
-				context,
+				apiKey,
 				`/analytics/by-model?start_date=${range.start}&end_date=${range.end}`
 			);
 			const filtered = rows.filter(r => inRange(r.date, range.start, range.end));
@@ -531,8 +590,13 @@ export function activate(context: vscode.ExtensionContext) {
 		if (!range) { return; }
 
 		try {
+			const apiKey = await context.secrets.get('aiCostOptimizer.apiKey');
+			if (!apiKey) {
+				vscode.window.showWarningMessage('SlopCost: No API key configured.');
+				return;
+			}
 			const rows = await callApi<CostByEndpoint[]>(
-				context,
+				apiKey,
 				`/analytics/by-endpoint?start_date=${range.start}&end_date=${range.end}`
 			);
 			const filtered = rows.filter(r => inRange(r.date, range.start, range.end));
@@ -866,13 +930,21 @@ export function activate(context: vscode.ExtensionContext) {
 				return Math.abs(hash).toString(16);
 			})();
 
+			const env = vscode.workspace.getConfiguration('slopcost').get<string>('environment', 'dev');
 			ingestUsage(apiKey, {
-				model: rec.model,
-				category: rec.category,
-				tokens: features.estimatedTokens,
-				intent: features.intent,
-				workspaceId,
-				timestamp: new Date().toISOString(),
+				provider: deriveProvider(rec.model),
+				modelName: rec.model,
+				inputTokens: features.estimatedTokens,
+				outputTokens: 0,
+				latencyMs: 0,
+				endpoint: 'heuristic',
+				environment: env,
+				metadata: {
+					intent: features.intent,
+					category: rec.category,
+					workspaceId,
+					source: 'status-bar-recommender',
+				},
 			});
 			// Intentionally NOT awaited — fire and forget
 		}
@@ -954,6 +1026,126 @@ export function activate(context: vscode.ExtensionContext) {
 
 	// Initial run for the currently active editor
 	updateRecommendation();
+
+	// ── Check Budget Command ──────────────────────────────────
+	context.subscriptions.push(
+		vscode.commands.registerCommand('aiCost.checkBudget', async () => {
+			const apiKey = await context.secrets.get('aiCostOptimizer.apiKey');
+			if (!apiKey) {
+				vscode.window.showWarningMessage('SlopCost: No API key configured. Run "SlopCost: Configure API Key" first.');
+				return;
+			}
+
+			const config = await readSlopCostConfig();
+
+			if (!outputChannel) {
+				outputChannel = vscode.window.createOutputChannel('Slop Cost');
+			}
+
+			let dailyCosts: DailyCost[];
+			try {
+				dailyCosts = await callApi<DailyCost[]>(apiKey, '/analytics/daily-cost');
+			} catch {
+				return;
+			}
+
+			const today = new Date().toISOString().split('T')[0];
+			const todayData = dailyCosts.find(d => d.date === today);
+			const spentUsd = todayData ? parseFloat(todayData.total_cost_usd) : 0;
+			const budget = config.dailyBudgetUsd;
+			const pct = budget > 0 ? Math.round((spentUsd / budget) * 100) : 0;
+			const remaining = Math.max(budget - spentUsd, 0);
+
+			// ── Output Channel report ────────────────────────────────────────────
+			const lines: string[] = [];
+			lines.push(...fmt.brand(`v0.0.1 · budget-check · ${today}`));
+			lines.push(fmt.header('budget check'));
+
+			if (pct >= 100) {
+				lines.push(fmt.alertField('status', '✖  daily budget exceeded'));
+			} else if (pct >= config.alertThresholdPct) {
+				lines.push(fmt.costField('status', `⚠  approaching daily budget (${pct}% used)`));
+			} else {
+				lines.push(fmt.field('status', `✓  within budget (${pct}% used)`));
+			}
+
+			lines.push(fmt.blank());
+			lines.push(fmt.field('budget limit', `$${budget.toFixed(2)} USD / day`));
+
+			if (pct >= config.alertThresholdPct) {
+				lines.push(fmt.costField('spent today', `$${spentUsd.toFixed(4)} USD  (${pct}%)`));
+			} else {
+				lines.push(fmt.field('spent today', `$${spentUsd.toFixed(4)} USD  (${pct}%)`));
+			}
+
+			lines.push(fmt.field('remaining', `$${remaining.toFixed(4)} USD`));
+			lines.push(fmt.footer(`configured in .slopcost · limit: $${budget.toFixed(2)}/day`));
+
+			fmt.print(outputChannel, lines);
+
+			// ── Notification toast ────────────────────────────────────────────────
+			if (pct >= 100) {
+				const choice = await vscode.window.showErrorMessage(
+					`SlopCost: Daily budget exceeded ($${spentUsd.toFixed(4)} / $${budget.toFixed(2)})`,
+					'Show Breakdown', 'Explain Cost'
+				);
+				if (choice === 'Show Breakdown') {
+					vscode.commands.executeCommand('aiCost.showByModel');
+				}
+				if (choice === 'Explain Cost') {
+					vscode.commands.executeCommand('aiCost.explainTodayCost');
+				}
+			} else if (pct >= config.alertThresholdPct) {
+				const choice = await vscode.window.showWarningMessage(
+					`SlopCost: ${pct}% of daily budget used ($${spentUsd.toFixed(4)} / $${budget.toFixed(2)})`,
+					'Show Breakdown'
+				);
+				if (choice === 'Show Breakdown') {
+					vscode.commands.executeCommand('aiCost.showByModel');
+				}
+			}
+		})
+	);
+
+	// ── Auto Budget Check on Startup ──────────────────────────
+	// Silent unless threshold is crossed
+	(async () => {
+		const apiKey = await context.secrets.get('aiCostOptimizer.apiKey');
+		if (!apiKey) { return; }
+
+		try {
+			const config = await readSlopCostConfig();
+			const dailyCosts = await callApi<DailyCost[]>(apiKey, '/analytics/daily-cost');
+			const today = new Date().toISOString().split('T')[0];
+			const todayData = dailyCosts.find(d => d.date === today);
+			const spentUsd = todayData ? parseFloat(todayData.total_cost_usd) : 0;
+			const pct = config.dailyBudgetUsd > 0
+				? Math.round((spentUsd / config.dailyBudgetUsd) * 100)
+				: 0;
+
+			if (pct >= 100) {
+				vscode.window.showErrorMessage(
+					`SlopCost: Daily budget already exceeded at startup ($${spentUsd.toFixed(4)} / $${config.dailyBudgetUsd.toFixed(2)})`,
+					'Show Details'
+				).then(c => {
+					if (c === 'Show Details') {
+						vscode.commands.executeCommand('aiCost.checkBudget');
+					}
+				});
+			} else if (pct >= config.alertThresholdPct) {
+				vscode.window.showWarningMessage(
+					`SlopCost: ${pct}% of today's budget already used`,
+					'Show Details'
+				).then(c => {
+					if (c === 'Show Details') {
+						vscode.commands.executeCommand('aiCost.checkBudget');
+					}
+				});
+			}
+		} catch {
+			// Backend unreachable at startup — fail silently
+		}
+	})();
 }
 
 // This method is called when your extension is deactivated
@@ -1091,17 +1283,19 @@ function createProxyHandler(
 					// No prompt text. No response text. No API key.
 					const apiKey = await context.secrets.get('aiCostOptimizer.apiKey');
 					if (apiKey) {
+						const env = vscode.workspace.getConfiguration('slopcost').get<string>('environment', 'dev');
 						ingestUsage(apiKey, {
-							model: modelId,
-							category: 'CODE',
-							tokens: totalTokens,
-							intent: 'proxied',
-							workspaceId,
-							timestamp: new Date().toISOString(),
-							costUsd,
+							provider: deriveProvider(modelId),
+							modelName: modelId,
 							inputTokens,
 							outputTokens,
-							tracked: true,
+							latencyMs: 0,
+							endpoint: targetPath,
+							environment: env,
+							metadata: {
+								workspaceId,
+								source: 'proxy',
+							},
 						});
 					}
 				});
@@ -1139,47 +1333,60 @@ function estimateCost(model: string, inputTokens: number, outputTokens: number):
 
 async function ingestUsage(
 	apiKey: string,
-	payload: {
-		model: string;
-		category: string;
-		tokens: number;
-		intent: string;
-		workspaceId: string;
-		timestamp: string;
-		costUsd?: number;
-		inputTokens?: number;
-		outputTokens?: number;
-		tracked?: boolean;
+	opts: {
+		provider: string;
+		modelName: string;
+		inputTokens: number;
+		outputTokens: number;
+		latencyMs: number;
+		endpoint: string;
+		environment: string;
+		metadata?: Record<string, unknown>;
 	}
 ): Promise<void> {
-	// Fire-and-forget — never await this from updateRecommendation()
-	// workspaceId is a safe non-reversible identifier — never the raw path
+	const baseUrl = vscode.workspace.getConfiguration('slopcost').get<string>('backendUrl', 'http://localhost:8000');
+
 	try {
-		await fetch('http://localhost:8000/ingest/usage', {
+		await fetch(`${baseUrl}/ingest/usage`, {
 			method: 'POST',
 			headers: {
 				'Content-Type': 'application/json',
 				'Authorization': `Bearer ${apiKey}`,
 			},
-			body: JSON.stringify(payload),
+			body: JSON.stringify({
+				provider: opts.provider,
+				model_name: opts.modelName,
+				input_tokens: opts.inputTokens,
+				output_tokens: opts.outputTokens,
+				latency_ms: opts.latencyMs,
+				endpoint: opts.endpoint,
+				environment: opts.environment,
+				...(opts.metadata ? { metadata: opts.metadata } : {}),
+			}),
 		});
 	} catch {
 		// Silently swallow — backend being down must never affect the recommender
 	}
 }
 
+function deriveProvider(modelId: string): string {
+	if (modelId.startsWith('claude')) { return 'anthropic'; }
+	if (modelId.startsWith('gpt') || modelId.startsWith('o3') || modelId.startsWith('o1')) {
+		return 'openai';
+	}
+	if (modelId.startsWith('gemini')) { return 'google'; }
+	if (modelId.startsWith('grok')) { return 'groq'; }
+	if (modelId.startsWith('deepseek')) { return 'deepseek'; }
+	return 'unknown';
+}
+
 async function callApi<T>(
-	context: vscode.ExtensionContext,
+	apiKey: string,
 	path: string,
 	options?: RequestInit
 ): Promise<T> {
-	const apiKey = await context.secrets.get('aiCostOptimizer.apiKey');
-	if (!apiKey) {
-		vscode.window.showErrorMessage('API Key missing. Please run "AI Cost: Configure API Key" first.');
-		throw new Error('API Key missing');
-	}
-
-	const url = `http://localhost:8000${path.startsWith('/') ? path : `/${path}`}`;
+	const baseUrl = vscode.workspace.getConfiguration('slopcost').get<string>('backendUrl', 'http://localhost:8000');
+	const url = `${baseUrl}${path.startsWith('/') ? path : `/${path}`}`;
 
 	try {
 		const response = await fetch(url, {

@@ -50,6 +50,10 @@
       {
         "command": "aiCost.stopProxy",
         "title": "SlopCost: Stop Proxy"
+      },
+      {
+        "command": "aiCost.checkBudget",
+        "title": "SlopCost: Check Budget"
       }
     ],
     "viewsContainers": {
@@ -87,6 +91,35 @@
           "type": "number",
           "default": 9999,
           "description": "Local port for the SlopCost proxy. Change if 9999 is in use."
+        },
+        "slopcost.environment": {
+          "type": "string",
+          "default": "dev",
+          "enum": [
+            "dev",
+            "prod"
+          ],
+          "description": "Environment tag sent with usage ingest. Use 'prod' for production workspaces."
+        },
+        "slopcost.backendUrl": {
+          "type": "string",
+          "default": "http://localhost:8000",
+          "description": "Base URL of the SlopCost backend. Change for team/org deployments."
+        },
+        "slopcost.budget.daily": {
+          "type": "number",
+          "default": 1.00,
+          "description": "Daily AI spend budget in USD. Overridden by .slopcost file if present."
+        },
+        "slopcost.budget.weekly": {
+          "type": "number",
+          "default": 5.00,
+          "description": "Weekly AI spend budget in USD. Overridden by .slopcost file if present."
+        },
+        "slopcost.budget.alertPct": {
+          "type": "number",
+          "default": 80,
+          "description": "Percentage of budget at which a warning notification fires. Default: 80."
         }
       }
     }
