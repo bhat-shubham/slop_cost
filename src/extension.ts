@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import * as http from 'http';
 import * as https from 'https';
+import { getDashboardHtml } from './webview';
 
 type DailyCost = {
 	date: string;
@@ -38,6 +39,26 @@ type CostByEndpoint = {
 
 // ── Global Proxy State ──────────────────────────────────────
 let proxyServer: http.Server | null = null;
+
+// ── WebView Types ────────────────────────────────────────────
+type FeedItem = {
+	model:    string;
+	category: CategoryKey;
+	intent:   string;
+	ts:       string;
+};
+
+type WebViewState = {
+	hasApiKey:  boolean;
+	loading:    boolean;
+	error:      string | null;
+	todayData:  DailyCost | null;
+	weekData:   DailyCost[];
+	modelData:  CostByModel[];
+	feedItems:  FeedItem[];
+	slopScore:  number | null;
+	ingestEnabled: boolean;
+};
 
 // ── Types: Local Model Recommender ─────────────────────────
 
@@ -209,6 +230,7 @@ type SlopCostConfig = {
 	weeklyBudgetUsd: number;
 	alertThresholdPct: number;
 	environment: string;
+	workspaceAlias: string;
 };
 
 const DEFAULT_CONFIG: SlopCostConfig = {
@@ -216,6 +238,7 @@ const DEFAULT_CONFIG: SlopCostConfig = {
 	weeklyBudgetUsd: 5.00,
 	alertThresholdPct: 80,
 	environment: 'dev',
+	workspaceAlias: '',
 };
 
 async function readSlopCostConfig(): Promise<SlopCostConfig> {
@@ -232,6 +255,7 @@ async function readSlopCostConfig(): Promise<SlopCostConfig> {
 				weeklyBudgetUsd: json.weeklyBudgetUsd ?? vscConfig.get('budget.weekly', DEFAULT_CONFIG.weeklyBudgetUsd),
 				alertThresholdPct: json.alertThresholdPct ?? vscConfig.get('budget.alertPct', DEFAULT_CONFIG.alertThresholdPct),
 				environment: json.environment ?? vscConfig.get('environment', DEFAULT_CONFIG.environment),
+				workspaceAlias: json.workspaceAlias ?? vscConfig.get('workspaceAlias', ''),
 			};
 		} catch {
 			// Malformed .slopcost — fall through to VS Code settings
@@ -243,6 +267,7 @@ async function readSlopCostConfig(): Promise<SlopCostConfig> {
 		weeklyBudgetUsd: vscConfig.get('budget.weekly', DEFAULT_CONFIG.weeklyBudgetUsd),
 		alertThresholdPct: vscConfig.get('budget.alertPct', DEFAULT_CONFIG.alertThresholdPct),
 		environment: vscConfig.get('environment', DEFAULT_CONFIG.environment),
+		workspaceAlias: vscConfig.get('workspaceAlias', ''),
 	};
 }
 
@@ -775,8 +800,12 @@ export function activate(context: vscode.ExtensionContext) {
 		'/deepseek': { host: 'api.deepseek.com', port: 443 },
 	};
 
-	// Compute workspace ID once — hashed, never the raw path
-	const workspaceId = (() => {
+	// ── Workspace Identity (shared across proxy + recommender) ────────────
+	const workspaceAlias = vscode.workspace
+		.getConfiguration('slopcost')
+		.get<string>('workspaceAlias', '').trim();
+
+	const workspaceHash = (() => {
 		const raw = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? 'unknown';
 		let hash = 0;
 		for (let i = 0; i < raw.length; i++) {
@@ -784,6 +813,9 @@ export function activate(context: vscode.ExtensionContext) {
 		}
 		return Math.abs(hash).toString(16);
 	})();
+
+	// workspaceId is the alias if set, otherwise the anonymous hash
+	let workspaceId = workspaceAlias.length > 0 ? workspaceAlias : workspaceHash;
 
 	const startProxyCmd = vscode.commands.registerCommand('aiCost.startProxy', async () => {
 		if (proxyServer) {
@@ -843,10 +875,70 @@ export function activate(context: vscode.ExtensionContext) {
 		showSessionStatsCmd, startProxyCmd, stopProxyCmd
 	);
 
-	// ── Activity Bar: TreeView ────────────────────────────────
-	const treeProvider = new SlopCostTreeDataProvider();
+	// ── Activity Bar: WebView Dashboard ─────────────────────
+	let webViewProvider: SlopCostWebViewProvider | undefined;
+
+	// Live feed — last 20 recommendations for the WebView feed
+	const feedBuffer: FeedItem[] = [];
+
+	async function getWebViewState(): Promise<WebViewState> {
+		const apiKey = await context.secrets.get('aiCostOptimizer.apiKey');
+
+		if (!apiKey) {
+			return {
+				hasApiKey: false, loading: false, error: null,
+				todayData: null, weekData: [], modelData: [],
+				feedItems: feedBuffer.slice(0, 12),
+				slopScore: computeSlopScore(session),
+				ingestEnabled: isIngestEnabled(),
+			};
+		}
+
+		try {
+			const [dailyCosts, modelCosts] = await Promise.all([
+				callApi<DailyCost[]>(apiKey, '/analytics/daily-cost').catch(() => [] as DailyCost[]),
+				callApi<CostByModel[]>(apiKey, '/analytics/by-model').catch(() => [] as CostByModel[]),
+			]);
+
+			const today     = new Date().toISOString().split('T')[0];
+			const todayData = dailyCosts.find(d => d.date === today) ?? null;
+
+			// Last 7 days sorted ascending for sparkline
+			const weekData = dailyCosts
+				.filter(d => d.date >= new Date(Date.now() - 7 * 864e5).toISOString().split('T')[0])
+				.sort((a, b) => a.date.localeCompare(b.date));
+
+			return {
+				hasApiKey: true, loading: false, error: null,
+				todayData, weekData, modelData: modelCosts,
+				feedItems: feedBuffer.slice(0, 12),
+				slopScore: computeSlopScore(session),
+				ingestEnabled: isIngestEnabled(),
+			};
+		} catch {
+			return {
+				hasApiKey: true, loading: false,
+				error: 'Could not reach backend',
+				todayData: null, weekData: [], modelData: [],
+				feedItems: feedBuffer.slice(0, 12),
+				slopScore: computeSlopScore(session),
+				ingestEnabled: isIngestEnabled(),
+			};
+		}
+	}
+
+	webViewProvider = new SlopCostWebViewProvider(
+		context.extensionUri,
+		context,
+		getWebViewState
+	);
+
 	context.subscriptions.push(
-		vscode.window.registerTreeDataProvider('slopcost.overview', treeProvider)
+		vscode.window.registerWebviewViewProvider(
+			'slopcost.overview',
+			webViewProvider,
+			{ webviewOptions: { retainContextWhenHidden: true } }
+		)
 	);
 
 	// ── Status Bar: Model Recommendation ──────────────────
@@ -915,20 +1007,22 @@ export function activate(context: vscode.ExtensionContext) {
 			recommendations: existing.recommendations + 1,
 		});
 
+		// Push to live feed for WebView
+		feedBuffer.unshift({
+			model:    rec.model,
+			category: rec.category,
+			intent:   features.intent,
+			ts:       new Date().toISOString(),
+		});
+		if (feedBuffer.length > 20) { feedBuffer.pop(); }
+		webViewProvider?.refresh();
+
 		// ── Ingest to Backend ──────────────────────────────────────────────────────
 
 		// Ingest to backend if API key is configured — non-blocking
 		const apiKey = await context.secrets.get('aiCostOptimizer.apiKey');
 		if (apiKey) {
-			const workspaceId = (() => {
-				// Hash the workspace path — never send the raw path
-				const raw = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? 'unknown';
-				let hash = 0;
-				for (let i = 0; i < raw.length; i++) {
-					hash = (Math.imul(31, hash) + raw.charCodeAt(i)) | 0;
-				}
-				return Math.abs(hash).toString(16);
-			})();
+			// workspaceId is already computed in activate() scope
 
 			const env = vscode.workspace.getConfiguration('slopcost').get<string>('environment', 'dev');
 			ingestUsage(apiKey, {
@@ -1113,8 +1207,33 @@ export function activate(context: vscode.ExtensionContext) {
 		const apiKey = await context.secrets.get('aiCostOptimizer.apiKey');
 		if (!apiKey) { return; }
 
+		// One-time ingest consent prompt
+		const hasShownIngestPrompt = context.globalState.get<boolean>('hasShownIngestPrompt', false);
+		if (!hasShownIngestPrompt) {
+			context.globalState.update('hasShownIngestPrompt', true);
+			vscode.window.showInformationMessage(
+				'SlopCost can send token counts and model names to your backend for analytics. ' +
+				'No prompt text or API keys are ever sent. Enable usage ingest?',
+				'Enable', 'Not now', 'Learn more'
+			).then(choice => {
+				if (choice === 'Enable') {
+					vscode.workspace.getConfiguration('slopcost').update(
+						'enableUsageIngest', true, vscode.ConfigurationTarget.Global
+					).then(() => {
+						vscode.window.showInformationMessage('SlopCost: Usage ingest enabled. You can disable it in settings.');
+						webViewProvider?.refresh();
+					});
+				} else if (choice === 'Learn more') {
+					vscode.env.openExternal(vscode.Uri.parse('https://github.com/your-repo/slopcost#privacy'));
+				}
+			});
+		}
+
 		try {
 			const config = await readSlopCostConfig();
+			if (config.workspaceAlias.length > 0 && workspaceAlias.length === 0) {
+				workspaceId = config.workspaceAlias;
+			}
 			const dailyCosts = await callApi<DailyCost[]>(apiKey, '/analytics/daily-cost');
 			const today = new Date().toISOString().split('T')[0];
 			const todayData = dailyCosts.find(d => d.date === today);
@@ -1331,6 +1450,12 @@ function estimateCost(model: string, inputTokens: number, outputTokens: number):
 	return (inputTokens * inputRate) + (outputTokens * outputRate);
 }
 
+function isIngestEnabled(): boolean {
+	return vscode.workspace
+		.getConfiguration('slopcost')
+		.get<boolean>('enableUsageIngest', false);
+}
+
 async function ingestUsage(
 	apiKey: string,
 	opts: {
@@ -1344,6 +1469,9 @@ async function ingestUsage(
 		metadata?: Record<string, unknown>;
 	}
 ): Promise<void> {
+	// Gate: do nothing if ingest is not explicitly enabled
+	if (!isIngestEnabled()) { return; }
+
 	const baseUrl = vscode.workspace.getConfiguration('slopcost').get<string>('backendUrl', 'http://localhost:8000');
 
 	try {
@@ -1577,80 +1705,53 @@ function isLongButSimple(features: PromptFeatures): boolean {
 		&& !features.hasStackTrace;
 }
 
-// ── Activity Bar: SlopCost Panel ──────────────────────────────────────
-// Static tree of 4 action nodes — each one fires an existing command.
-// This is the skeleton; dynamic data (live cost, model stats) can hang
-// off these same nodes in future iterations.
+// ── WebView Provider ──────────────────────────────────────────────────────────
 
-class SlopCostItem extends vscode.TreeItem {
+class SlopCostWebViewProvider implements vscode.WebviewViewProvider {
+	private _view?: vscode.WebviewView;
+
 	constructor(
-		label: string,
-		icon: string,
-		commandId: string,
-		description?: string
-	) {
-		super(label, vscode.TreeItemCollapsibleState.None);
-		this.iconPath = new vscode.ThemeIcon(icon);
-		this.description = description;
-		this.command = {
-			command: commandId,
-			title: label,
+		private readonly extensionUri: vscode.Uri,
+		private readonly context: vscode.ExtensionContext,
+		private readonly getState: () => Promise<WebViewState>
+	) {}
+
+	resolveWebviewView(
+		webviewView: vscode.WebviewView,
+		_ctx:        vscode.WebviewViewResolveContext,
+		_token:      vscode.CancellationToken
+	): void {
+		this._view = webviewView;
+
+		webviewView.webview.options = {
+			enableScripts:      true,
+			localResourceRoots: [this.extensionUri],
 		};
-		this.tooltip = label;
-	}
-}
 
-class SlopCostTreeDataProvider implements vscode.TreeDataProvider<SlopCostItem> {
-	private readonly nodes: SlopCostItem[] = [
-		new SlopCostItem(
-			"Today's Cost",
-			'graph-line',
-			'aiCost.showTodayCost',
-			'View spend summary'
-		),
-		new SlopCostItem(
-			'Cost By Model',
-			'symbol-misc',
-			'aiCost.showByModel',
-			'Breakdown per model'
-		),
-		new SlopCostItem(
-			'Cost By Endpoint',
-			'symbol-interface',
-			'aiCost.showByEndpoint',
-			'Breakdown per endpoint'
-		),
-		new SlopCostItem(
-			'Show Session Stats',
-			'history',
-			'aiCost.showSessionStats',
-			'Usage in this window'
-		),
-		new SlopCostItem(
-			'Explain Cost',
-			'sparkle',
-			'aiCost.explainTodayCost',
-			'AI-powered breakdown'
-		),
-		new SlopCostItem(
-			'Configure API Key',
-			'key',
-			'aiCost.configureApiKey',
-			'Set or update key'
-		),
-		new SlopCostItem(
-			'Configure Models',
-			'list-filter',
-			'aiCost.configureAvailableModels',
-			'Pick your available models'
-		),
-	];
+		webviewView.webview.html = getDashboardHtml(webviewView.webview, this.extensionUri);
 
-	getTreeItem(element: SlopCostItem): vscode.TreeItem {
-		return element;
+		// Handle messages from the WebView
+		webviewView.webview.onDidReceiveMessage(async msg => {
+			if (msg.type === 'command') {
+				vscode.commands.executeCommand(msg.command);
+			}
+			if (msg.type === 'requestData') {
+				await this.refresh();
+			}
+		});
+
+		// Refresh when panel becomes visible
+		webviewView.onDidChangeVisibility(() => {
+			if (webviewView.visible) { this.refresh(); }
+		});
+
+		// Initial load
+		this.refresh();
 	}
 
-	getChildren(): SlopCostItem[] {
-		return this.nodes;
+	async refresh(): Promise<void> {
+		if (!this._view?.visible) { return; }
+		const state = await this.getState();
+		this._view.webview.postMessage({ type: 'update', state });
 	}
 }

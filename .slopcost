@@ -2,5 +2,6 @@
   "dailyBudgetUsd": 1.00,
   "weeklyBudgetUsd": 5.00,
   "alertThresholdPct": 80,
-  "environment": "dev"
+  "environment": "dev",
+  "workspaceAlias": "my-project"
 }

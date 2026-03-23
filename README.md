@@ -1,71 +1,66 @@
-# slopcost README
+# SlopCost
 
-This is the README for your extension "slopcost". After writing up a brief description, we recommend including the following sections.
+A local-first VS Code extension that tracks AI development cost, token usage, and provides a real-time 'Slop Score' based on inference efficiency.
 
-## Features
+## Overview
 
-Describe specific features of your extension including screenshots of your extension in action. Image paths are relative to this README file.
+SlopCost acts as a local proxy between your IDE (Cursor, VS Code + Continue) and your model providers.
+It records usage data without ever sending prompt text, response content, or API keys to the backend.
 
-For example if there is an image subfolder under your extension project workspace:
+- **Real-time Recommender**: Suggests the most cost-efficient model based on your typing patterns.
+- **Slop Score**: A visual score metric reflecting how efficiently you use AI bandwidth.
+- **Cost Tracking**: Logs cost by day, by model, and by endpoint.
+- **Session Stats**: Live summary of tokens used in the current programming session.
+- **Privacy First**: Fully self-hostable, with an explicit opt-in telemetry gate.
 
-\!\[feature X\]\(images/feature-x.png\)
+## Privacy
 
-> Tip: Many popular extensions utilize animations. This is an excellent way to show off your extension! We recommend short, focused animations that are easy to follow.
+SlopCost is a local-first tool. Here is exactly what it does and does not collect.
 
-## Requirements
+### What the extension collects
 
-If you have any requirements or dependencies, add a section describing those and how to install and configure them.
+| Data | Collected | Destination |
+|---|---|---|
+| Prompt text | **Never** | — |
+| Response text | **Never** | — |
+| Your API keys | **Never** | — |
+| File contents | **Never** | — |
+| File paths | **Never** | — |
+| Model name | Yes | Your self-hosted backend |
+| Input token count | Yes | Your self-hosted backend |
+| Output token count | Yes | Your self-hosted backend |
+| Estimated cost (USD) | Yes | Your self-hosted backend |
+| Intent classification | Yes | Your self-hosted backend |
+| Workspace ID (hashed) | Yes | Your self-hosted backend |
+| Timestamp | Yes | Your self-hosted backend |
 
-## Extension Settings
+### Key guarantees
 
-Include if your extension adds any VS Code settings through the `contributes.configuration` extension point.
+- **Opt-in only.** Usage ingest is disabled by default. You must explicitly enable it in settings or respond to the one-time prompt.
+- **Local proxy binds to 127.0.0.1 only.** The proxy is unreachable from any other machine on your network.
+- **Your backend, your data.** SlopCost sends data to your self-hosted backend at `slopcost.backendUrl` (default: `http://localhost:8000`). Anthropic, OpenAI, and the SlopCost authors never receive your usage data.
+- **Workspace ID is a one-way hash.** The raw workspace path is never sent. A djb2 hash is used for anonymous grouping. You can override it with a human-readable alias via `slopcost.workspaceAlias` or in `.slopcost`.
+- **API keys stored in VS Code Secret Storage.** Never in `settings.json`, never logged, never sent anywhere other than your configured backend.
 
-For example:
+### For org deployments
 
-This extension contributes the following settings:
+Commit a `.slopcost` file to your repository to standardise budget limits, environment tags, and workspace aliases across the team:
 
-* `myExtension.enable`: Enable/disable this extension.
-* `myExtension.thing`: Set to `blah` to do something.
+```json
+{
+  "dailyBudgetUsd":    5.00,
+  "weeklyBudgetUsd":   20.00,
+  "alertThresholdPct": 80,
+  "environment":       "dev",
+  "workspaceAlias":    "your-team-name"
+}
+```
 
-## Known Issues
+Enable ingest for the team by setting `slopcost.enableUsageIngest: true` in a committed `.vscode/settings.json`:
 
-Calling out known issues can help limit users opening duplicate issues against your extension.
-
-## Release Notes
-
-Users appreciate release notes as you update your extension.
-
-### 1.0.0
-
-Initial release of ...
-
-### 1.0.1
-
-Fixed issue #.
-
-### 1.1.0
-
-Added features X, Y, and Z.
-
----
-
-## Following extension guidelines
-
-Ensure that you've read through the extensions guidelines and follow the best practices for creating your extension.
-
-* [Extension Guidelines](https://code.visualstudio.com/api/references/extension-guidelines)
-
-## Working with Markdown
-
-You can author your README using Visual Studio Code. Here are some useful editor keyboard shortcuts:
-
-* Split the editor (`Cmd+\` on macOS or `Ctrl+\` on Windows and Linux).
-* Toggle preview (`Shift+Cmd+V` on macOS or `Shift+Ctrl+V` on Windows and Linux).
-* Press `Ctrl+Space` (Windows, Linux, macOS) to see a list of Markdown snippets.
-
-## For more information
-
-* [Visual Studio Code's Markdown Support](http://code.visualstudio.com/docs/languages/markdown)
-* [Markdown Syntax Reference](https://help.github.com/articles/markdown-basics/)
-
-**Enjoy!**
+```json
+{
+  "slopcost.enableUsageIngest": true,
+  "slopcost.backendUrl": "http://your-internal-backend:8000"
+}
+```

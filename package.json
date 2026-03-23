@@ -68,6 +68,7 @@
     "views": {
       "slopcost": [
         {
+          "type": "webview",
           "id": "slopcost.overview",
           "name": "Overview",
           "icon": "media/slopcost-icon.svg"
@@ -105,6 +106,16 @@
           "type": "string",
           "default": "http://localhost:8000",
           "description": "Base URL of the SlopCost backend. Change for team/org deployments."
+        },
+        "slopcost.workspaceAlias": {
+          "type": "string",
+          "default": "",
+          "description": "Optional human-readable name for this workspace sent with usage data. Example: 'payments-service' or 'frontend-team'. Leave empty to use anonymous hashed ID only."
+        },
+        "slopcost.enableUsageIngest": {
+          "type": "boolean",
+          "default": false,
+          "description": "Send usage telemetry (token counts, model names, costs) to your SlopCost backend. No prompt text or API keys are ever sent. Default: false (opt-in required)."
         },
         "slopcost.budget.daily": {
           "type": "number",
